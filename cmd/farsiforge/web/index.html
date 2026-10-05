@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FarsiForge — فارسی‌ساز بازی</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="logo">
+                <h1>🔨 FarsiForge</h1>
+                <p>فارسی‌ساز بازی</p>
+            </div>
+            <nav class="steps">
+                <button class="step active" data-step="detect">
+                    <span class="step-num">۱</span>
+                    <span class="step-label">انتخاب بازی</span>
+                </button>
+                <button class="step" data-step="extract">
+                    <span class="step-num">۲</span>
+                    <span class="step-label">استخراج متن</span>
+                </button>
+                <button class="step" data-step="translate">
+                    <span class="step-num">۳</span>
+                    <span class="step-label">ترجمه</span>
+                </button>
+                <button class="step" data-step="inject">
+                    <span class="step-num">۴</span>
+                    <span class="step-label">تزریق</span>
+                </button>
+                <button class="step" data-step="installer">
+                    <span class="step-num">۵</span>
+                    <span class="step-label">ساخت نصاب</span>
+                </button>
+            </nav>
+            <div class="sidebar-footer">
+                <div id="stats-mini" class="stats-mini hidden">
+                    <span class="stat-item">📝 <span id="stat-total">0</span></span>
+                    <span class="stat-item">✅ <span id="stat-translated">0</span></span>
+                    <span class="stat-item">⏳ <span id="stat-remaining">0</span></span>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main content -->
+        <main class="content">
+            <!-- Step 1: Detect -->
+            <section id="view-detect" class="view active">
+                <h2>انتخاب و تشخیص بازی</h2>
+                <p class="hint">پوشه بازی را انتخاب کنید تا موتور بازی‌سازی به‌صورت خودکار شناسایی شود.</p>
+                
+                <div class="form-group">
+                    <label>مسیر پوشه بازی:</label>
+                    <div class="path-input">
+                        <input type="text" id="game-path" placeholder="D:\SteamLibrary\steamapps\common\GameName" class="input">
+                        <button onclick="browsePath()" class="btn btn-secondary">Browse</button>
+                    </div>
+                </div>
+
+                <button onclick="detectEngine()" class="btn btn-primary">
+                    🔍 تشخیص موتور بازی
+                </button>
+
+                <div id="detect-result" class="result-box hidden">
+                    <div class="result-header">
+                        <h3>نتایج تشخیص</h3>
+                    </div>
+                    <div class="result-body" id="detect-info"></div>
+                    <button onclick="goToStep('extract')" class="btn btn-primary">
+                        ادامه ← استخراج متن
+                    </button>
+                </div>
+            </section>
+
+            <!-- Step 2: Extract -->
+            <section id="view-extract" class="view">
+                <h2>استخراج متن و دیالوگ‌ها</h2>
+                <p class="hint">متن‌های قابل ترجمه از فایل‌های بازی استخراج می‌شوند.</p>
+                
+                <div id="extract-info" class="info-box"></div>
+                
+                <button onclick="extractStrings()" class="btn btn-primary">
+                    📤 استخراج متن‌ها
+                </button>
+
+                <div id="extract-progress" class="progress-box hidden">
+                    <div class="spinner"></div>
+                    <p>در حال استخراج... لطفاً صبر کنید.</p>
+                </div>
+
+                <div id="extract-result" class="result-box hidden">
+                    <div class="result-body" id="extract-stats"></div>
+                    <div class="btn-row">
+                        <button onclick="exportXLSX()" class="btn btn-secondary">
+                            📊 خروجی Excel
+                        </button>
+                        <button onclick="exportCSV()" class="btn btn-secondary">
+                            📄 خروجی CSV
+                        </button>
+                        <button onclick="goToStep('translate')" class="btn btn-primary">
+                            ادامه ← ترجمه
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Step 3: Translate -->
+            <section id="view-translate" class="view">
+                <h2>ترجمه متن‌ها</h2>
+                
+                <div class="toolbar">
+                    <input type="text" id="search-box" placeholder="جستجو..." class="input search-input" oninput="filterEntries()">
+                    <select id="filter-status" class="input" onchange="filterEntries()">
+                        <option value="">همه</option>
+                        <option value="untranslated">ترجمه نشده</option>
+                        <option value="translated">ترجمه شده</option>
+                        <option value="approved">تایید شده</option>
+                    </select>
+                    <button onclick="importFile()" class="btn btn-secondary">📥 ایمپورت</button>
+                </div>
+
+                <div class="table-container">
+                    <table id="translation-table">
+                        <thead>
+                            <tr>
+                                <th>#</th>
+                                <th>متن اصلی</th>
+                                <th>ترجمه</th>
+                                <th>پیش‌نمایش</th>
+                                <th>وضعیت</th>
+                                <th>بافت</th>
+                            </tr>
+                        </thead>
+                        <tbody id="translation-body"></tbody>
+                    </table>
+                </div>
+
+                <div class="btn-row">
+                    <button onclick="goToStep('inject')" class="btn btn-primary">
+                        ادامه ← تزریق
+                    </button>
+                </div>
+            </section>
+
+            <!-- Step 4: Inject -->
+            <section id="view-inject" class="view">
+                <h2>تزریق ترجمه به بازی</h2>
+                <p class="hint">ترجمه‌های انجام شده با پردازش راست‌به‌چپ در فایل‌های بازی جایگزین می‌شوند.</p>
+
+                <div class="form-group">
+                    <label>تنظیمات پردازش فارسی:</label>
+                    <div class="checkbox-group">
+                        <label><input type="checkbox" id="opt-reshape" checked> اصلاح حروف (Reshape)</label>
+                        <label><input type="checkbox" id="opt-bidi" checked> مرتب‌سازی راست‌به‌چپ (BiDi)</label>
+                        <label><input type="checkbox" id="opt-yeh" checked> اصلاح ی و ک فارسی</label>
+                        <label><input type="checkbox" id="opt-digits" checked> اعداد فارسی</label>
+                    </div>
+                </div>
+
+                <button onclick="injectTranslations()" class="btn btn-primary">
+                    💉 تزریق ترجمه
+                </button>
+
+                <div id="inject-progress" class="progress-box hidden">
+                    <div class="spinner"></div>
+                    <p>در حال تزریق... لطفاً صبر کنید.</p>
+                </div>
+
+                <div id="inject-result" class="result-box hidden">
+                    <div class="result-body" id="inject-info"></div>
+                    <button onclick="goToStep('installer')" class="btn btn-primary">
+                        ادامه ← ساخت نصاب
+                    </button>
+                </div>
+            </section>
+
+            <!-- Step 5: Installer -->
+            <section id="view-installer" class="view">
+                <h2>ساخت نصاب فارسی‌ساز</h2>
+                <p class="hint">یک فایل installer.exe ساخته می‌شود که می‌توانید آن را برای دیگران منتشر کنید.</p>
+
+                <div class="form-group">
+                    <label>نام فارسی‌ساز:</label>
+                    <input type="text" id="patch-name" placeholder="مثلاً: فارسی‌ساز بازی X" class="input">
+                </div>
+                <div class="form-group">
+                    <label>نام سازنده:</label>
+                    <input type="text" id="patch-author" placeholder="نام شما یا تیم" class="input">
+                </div>
+                <div class="form-group">
+                    <label>توضیحات:</label>
+                    <textarea id="patch-desc" rows="3" placeholder="توضیحات اختیاری" class="input"></textarea>
+                </div>
+                <div class="form-group">
+                    <label>مسیر خروجی:</label>
+                    <input type="text" id="output-dir" placeholder="D:\FarsiForge\output" class="input">
+                </div>
+
+                <button onclick="buildInstaller()" class="btn btn-primary">
+                    📦 ساخت نصاب
+                </button>
+
+                <div id="installer-progress" class="progress-box hidden">
+                    <div class="spinner"></div>
+                    <p>در حال ساخت نصاب... لطفاً صبر کنید.</p>
+                </div>
+
+                <div id="installer-result" class="result-box hidden">
+                    <div class="result-body" id="installer-info"></div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <input type="file" id="import-file" accept=".xlsx,.csv" style="display:none" onchange="handleImport(event)">
+    <script src="app.js"></script>
+</body>
+</html>

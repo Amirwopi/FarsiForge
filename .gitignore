@@ -1,0 +1,32 @@
+# Build output
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Dependencies
+/vendor/
+
+# IDE / Editor
+.opencode/
+.vscode/
+.idea/
+
+# Test data & tools (too large for git)
+Tools/
+silent hill/
+three-game/
+two-game/
+memory-bank/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Temporary
+*.tmp
+*.bak
+*~

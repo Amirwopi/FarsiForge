@@ -1,0 +1,416 @@
+package main
+
+import (
+	"embed"
+	"encoding/json"
+	"fmt"
+	"io"
+	"io/fs"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+
+	"farsiforge/pkg/detection"
+	"farsiforge/pkg/exchange"
+	"farsiforge/pkg/extract"
+	"farsiforge/pkg/inject"
+	"farsiforge/pkg/installer"
+	"farsiforge/pkg/persian"
+	"farsiforge/pkg/project"
+	"farsiforge/pkg/tools"
+)
+
+//go:embed web
+var webFS embed.FS
+
+// Global state (single-user desktop app)
+var (
+	registry     *tools.Registry
+	currentProj  *project.Project
+	currentInfo  *detection.GameInfo
+	projectFile  string
+)
+
+func main() {
+	// Initialize tool registry
+	var err error
+	registry, err = tools.NewRegistry("D:\\FarsiForge\\Tools")
+	if err != nil {
+		log.Printf("Warning: %v", err)
+	}
+
+	// Find available port
+	port := findAvailablePort(7842)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+
+	// Setup routes
+	mux := http.NewServeMux()
+
+	// Serve embedded web UI
+	webContent, _ := fs.Sub(webFS, "web")
+	mux.Handle("/", http.FileServer(http.FS(webContent)))
+
+	// API routes
+	mux.HandleFunc("/api/tools", handleTools)
+	mux.HandleFunc("/api/detect", handleDetect)
+	mux.HandleFunc("/api/extract", handleExtract)
+	mux.HandleFunc("/api/project", handleProject)
+	mux.HandleFunc("/api/translate", handleTranslate)
+	mux.HandleFunc("/api/export", handleExport)
+	mux.HandleFunc("/api/import", handleImport)
+	mux.HandleFunc("/api/inject", handleInject)
+	mux.HandleFunc("/api/build-installer", handleBuildInstaller)
+
+	// Start server
+	go func() {
+		log.Printf("FarsiForge starting on http://%s", addr)
+		if err := http.ListenAndServe(addr, mux); err != nil {
+			log.Fatal(err)
+		}
+	}()
+
+	// Open browser
+	url := fmt.Sprintf("http://%s", addr)
+	openBrowser(url)
+
+	fmt.Println()
+	fmt.Println("╔══════════════════════════════════════════════╗")
+	fmt.Println("║  🔨 FarsiForge — فارسی‌ساز بازی              ║")
+	fmt.Println("╠══════════════════════════════════════════════╣")
+	fmt.Printf("║  آدرس: http://%-31s║\n", addr)
+	fmt.Println("║  برای خروج: Ctrl+C                           ║")
+	fmt.Println("╚══════════════════════════════════════════════╝")
+	fmt.Println()
+
+	select {} // block forever
+}
+
+// ─── API Handlers ──────────────────────────────────────────────────
+
+func handleTools(w http.ResponseWriter, r *http.Request) {
+	respondJSON(w, registry)
+}
+
+func handleDetect(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, 400, "invalid request")
+		return
+	}
+
+	info, err := detection.Detect(req.Path)
+	if err != nil {
+		respondError(w, 500, err.Error())
+		return
+	}
+	currentInfo = info
+	respondJSON(w, info)
+}
+
+func handleExtract(w http.ResponseWriter, r *http.Request) {
+	var info detection.GameInfo
+	if err := json.NewDecoder(r.Body).Decode(&info); err != nil {
+		respondError(w, 400, "invalid request")
+		return
+	}
+
+	currentInfo = &info
+
+	// Create project
+	gameName := info.GameName
+	if gameName == "" {
+		gameName = filepath.Base(info.GameRoot)
+	}
+	currentProj = project.New(gameName+" — فارسی‌ساز", info.GameRoot, string(info.Engine))
+	currentProj.GameName = gameName
+	currentProj.Backend = string(info.Backend)
+	currentProj.Version = info.Version
+
+	// Run extraction
+	err := extract.Run(&info, currentProj, registry)
+	if err != nil {
+		respondError(w, 500, err.Error())
+		return
+	}
+
+	// Save project
+	projectFile = filepath.Join(info.GameRoot, ".farsiforge_project.json")
+	currentProj.Save(projectFile)
+
+	stats := currentProj.Stats()
+	respondJSON(w, map[string]interface{}{
+		"project":     currentProj,
+		"entries":     currentProj.Entries,
+		"entry_count": stats.Total,
+		"file_count":  len(uniqueFiles(currentProj.Entries)),
+	})
+}
+
+func handleProject(w http.ResponseWriter, r *http.Request) {
+	if currentProj == nil {
+		respondError(w, 404, "no project loaded")
+		return
+	}
+	respondJSON(w, currentProj)
+}
+
+func handleTranslate(w http.ResponseWriter, r *http.Request) {
+	if currentProj == nil {
+		respondError(w, 404, "no project loaded")
+		return
+	}
+
+	var req struct {
+		ID          string `json:"id"`
+		Translation string `json:"translation"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, 400, "invalid request")
+		return
+	}
+
+	status := project.StatusTranslated
+	if req.Translation == "" {
+		status = project.StatusUntranslated
+	}
+
+	if err := currentProj.SetTranslation(req.ID, req.Translation, status); err != nil {
+		respondError(w, 404, "entry not found")
+		return
+	}
+
+	// Auto-save
+	if projectFile != "" {
+		currentProj.Save(projectFile)
+	}
+
+	respondJSON(w, map[string]string{"status": "ok"})
+}
+
+func handleExport(w http.ResponseWriter, r *http.Request) {
+	if currentProj == nil {
+		respondError(w, 404, "no project loaded")
+		return
+	}
+
+	format := r.URL.Query().Get("format")
+	if format == "" {
+		format = "xlsx"
+	}
+
+	// Create temp file
+	ext := "." + format
+	tmpFile := filepath.Join(os.TempDir(), "farsiforge_export"+ext)
+
+	if err := exchange.Export(currentProj, tmpFile); err != nil {
+		respondError(w, 500, err.Error())
+		return
+	}
+
+	// Send file
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=farsiforge_export%s", ext))
+	if format == "xlsx" {
+		w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	} else {
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	}
+	http.ServeFile(w, r, tmpFile)
+}
+
+func handleImport(w http.ResponseWriter, r *http.Request) {
+	if currentProj == nil {
+		respondError(w, 404, "no project loaded")
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		respondError(w, 400, "no file uploaded")
+		return
+	}
+	defer file.Close()
+
+	// Save to temp file
+	tmpFile := filepath.Join(os.TempDir(), header.Filename)
+	dst, err := os.Create(tmpFile)
+	if err != nil {
+		respondError(w, 500, err.Error())
+		return
+	}
+	io.Copy(dst, file)
+	dst.Close()
+
+	count, err := exchange.Import(currentProj, tmpFile)
+	if err != nil {
+		respondError(w, 500, err.Error())
+		return
+	}
+
+	if projectFile != "" {
+		currentProj.Save(projectFile)
+	}
+
+	respondJSON(w, map[string]interface{}{
+		"imported": count,
+		"entries":  currentProj.Entries,
+	})
+}
+
+func handleInject(w http.ResponseWriter, r *http.Request) {
+	if currentProj == nil || currentInfo == nil {
+		respondError(w, 404, "no project loaded")
+		return
+	}
+
+	var req struct {
+		GameInfo detection.GameInfo   `json:"game_info"`
+		Options  map[string]bool      `json:"options"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, 400, "invalid request")
+		return
+	}
+
+	currentInfo = &req.GameInfo
+
+	// Build Persian processing options
+	opts := persian.Options{
+		Reshape:       req.Options["reshape"],
+		BidiReorder:   req.Options["bidi_reorder"],
+		FixYeh:        req.Options["fix_yeh"],
+		PersianDigits: req.Options["persian_digits"],
+	}
+	// Set defaults if all false
+	if !opts.Reshape && !opts.BidiReorder && !opts.FixYeh && !opts.PersianDigits {
+		opts = persian.DefaultOptions()
+	}
+
+	// Run injection
+	modified, err := inject.Run(currentInfo, currentProj, registry, opts)
+	if err != nil {
+		respondError(w, 500, err.Error())
+		return
+	}
+
+	respondJSON(w, map[string]interface{}{
+		"modified_count": len(modified),
+		"modified_files": modified,
+	})
+}
+
+func handleBuildInstaller(w http.ResponseWriter, r *http.Request) {
+	if currentProj == nil || currentInfo == nil {
+		respondError(w, 404, "no project loaded")
+		return
+	}
+
+	var req struct {
+		PatchName   string `json:"patch_name"`
+		Author      string `json:"author"`
+		Description string `json:"description"`
+		OutputDir   string `json:"output_dir"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+
+	if req.OutputDir == "" {
+		req.OutputDir = filepath.Join("D:\\FarsiForge", "output", currentProj.GameName)
+	}
+
+	// Build the installer package
+	cfg := installer.BuildConfig{
+		GameRoot:      currentInfo.GameRoot,
+		ModifiedFiles: currentProj.ModifiedFiles,
+		BackupFiles:   currentProj.ExtractedFiles,
+		GameExe:       currentInfo.GameExe,
+		Engine:        string(currentInfo.Engine),
+		PatchName:     req.PatchName,
+		Description:   req.Description,
+		Author:        req.Author,
+		OutputDir:     req.OutputDir,
+	}
+
+	if err := installer.Build(cfg); err != nil {
+		respondError(w, 500, err.Error())
+		return
+	}
+
+	// Also build the installer executable
+	installerPath := ""
+	if runtime.GOOS == "windows" {
+		installerPath = filepath.Join(req.OutputDir, "installer.exe")
+		// Compile the installer binary
+		installerSrc := "farsiforge/cmd/farsiforge-installer"
+		cmd := exec.Command("go", "build", "-o", installerPath, installerSrc)
+		cmd.Dir = "D:\\FarsiForge"
+		if err := cmd.Run(); err != nil {
+			log.Printf("Failed to build installer exe: %v", err)
+		}
+	}
+
+	respondJSON(w, map[string]interface{}{
+		"output_dir":     req.OutputDir,
+		"installer_path": installerPath,
+		"file_count":     len(cfg.ModifiedFiles),
+	})
+}
+
+// ─── Utilities ─────────────────────────────────────────────────────
+
+func respondJSON(w http.ResponseWriter, data interface{}) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	json.NewEncoder(w).Encode(data)
+}
+
+func respondError(w http.ResponseWriter, code int, msg string) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+func findAvailablePort(start int) int {
+	for port := start; port < start+100; port++ {
+		addr := fmt.Sprintf("127.0.0.1:%d", port)
+		listener, err := net.Listen("tcp", addr)
+		if err == nil {
+			listener.Close()
+			return port
+		}
+	}
+	return start
+}
+
+func openBrowser(url string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	case "darwin":
+		cmd = exec.Command("open", url)
+	default:
+		cmd = exec.Command("xdg-open", url)
+	}
+	cmd.Start()
+}
+
+func uniqueFiles(entries []project.StringEntry) []string {
+	seen := make(map[string]bool)
+	var files []string
+	for _, e := range entries {
+		if !seen[e.File] {
+			seen[e.File] = true
+			files = append(files, e.File)
+		}
+	}
+	return files
+}
+
+// Ensure imports are used
+var _ = strings.TrimSpace
+var _ = log.Printf
