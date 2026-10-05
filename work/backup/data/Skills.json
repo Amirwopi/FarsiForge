@@ -1,0 +1,1 @@
+[null, {"id": 1, "name": "Attack", "description": "A basic attack.", "message1": "%s attacks!", "message2": "%s takes damage!"}, {"id": 2, "name": "Fire", "description": "Cast a fireball at the enemy.", "message1": "%s casts Fire!", "message2": "Flames engulf %s!"}]

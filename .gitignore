@@ -30,3 +30,9 @@ Thumbs.db
 *.tmp
 *.bak
 *~
+
+# Test artifacts
+test_game/
+test_output/
+cmd/e2etest/
+bin/

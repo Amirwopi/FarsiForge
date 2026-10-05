@@ -31,6 +31,18 @@ func (e *RPGMakerExtractor) Extract(info *detection.GameInfo, proj *project.Proj
 		if !dirExists(dataDir) {
 			dataDir = filepath.Join(info.GameRoot, "data")
 		}
+	} else {
+		// DataPath might be "www" — check for "data" subdirectory
+		dataSubDir := filepath.Join(dataDir, "data")
+		if dirExists(dataSubDir) {
+			dataDir = dataSubDir
+		} else if !dirExists(filepath.Join(dataDir, "Actors.json")) {
+			// If no Actors.json in DataPath, try www/data pattern
+			altDir := filepath.Join(info.GameRoot, "www", "data")
+			if dirExists(altDir) {
+				dataDir = altDir
+			}
+		}
 	}
 	if !dirExists(dataDir) {
 		return fmt.Errorf("RPG Maker data directory not found: %s", dataDir)

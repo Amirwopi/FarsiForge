@@ -184,11 +184,12 @@ func (p *Project) SetTranslation(id, translation string, status Status) error {
 	return fmt.Errorf("entry not found: %s", id)
 }
 
-// ImportTranslations merges translations from a map of ID → translation.
+// ImportTranslations merges translations from a map of source → translation.
+// It matches by the source text (original string), not by entry ID.
 func (p *Project) ImportTranslations(translations map[string]string) int {
 	count := 0
 	for i := range p.Entries {
-		if tr, ok := translations[p.Entries[i].ID]; ok && tr != "" {
+		if tr, ok := translations[p.Entries[i].Source]; ok && tr != "" {
 			p.Entries[i].Translation = tr
 			if p.Entries[i].Status == StatusUntranslated {
 				p.Entries[i].Status = StatusTranslated

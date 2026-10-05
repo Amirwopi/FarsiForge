@@ -211,6 +211,11 @@ func (i *RPGMakerInjector) Inject(info *detection.GameInfo, proj *project.Projec
 		if !dirExists(dataDir) {
 			dataDir = filepath.Join(info.GameRoot, "data")
 		}
+	} else {
+		dataSubDir := filepath.Join(dataDir, "data")
+		if dirExists(dataSubDir) {
+			dataDir = dataSubDir
+		}
 	}
 	if !dirExists(dataDir) {
 		return nil, fmt.Errorf("RPG Maker data directory not found")
