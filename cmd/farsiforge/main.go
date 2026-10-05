@@ -20,8 +20,8 @@ import (
 	"farsiforge/pkg/extract"
 	"farsiforge/pkg/inject"
 	"farsiforge/pkg/installer"
-	"farsiforge/pkg/persian"
-	"farsiforge/pkg/project"
+	
+	"farsiforge/pkg/core"
 	"farsiforge/pkg/tools"
 )
 
@@ -31,8 +31,8 @@ var webFS embed.FS
 // Global state (single-user desktop app)
 var (
 	registry     *tools.Registry
-	currentProj  *project.Project
-	currentInfo  *detection.GameInfo
+	currentProj  *core.Project
+	currentInfo  *core.GameInfo
 	projectFile  string
 )
 
@@ -105,17 +105,34 @@ func handleDetect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	info, err := detection.Detect(req.Path)
+	res, err := detection.DefaultRegistry().Detect(req.Path)
 	if err != nil {
 		respondError(w, 500, err.Error())
 		return
 	}
-	currentInfo = info
-	respondJSON(w, info)
+	
+	dataPath := ""
+	if len(res.DataPaths) > 0 {
+		dataPath = res.DataPaths[0]
+	}
+	
+	currentInfo = &core.GameInfo{
+		Engine:     res.Engine,
+		Backend:    res.Backend,
+		Version:    res.Version,
+		GameName:   res.GameName,
+		GameExe:    res.GameExe,
+		GameRoot:   req.Path,
+		DataPath:   dataPath,
+		Confidence: res.Confidence,
+		Evidence:   res.Evidence,
+		Metadata:   res.Metadata,
+	}
+	respondJSON(w, currentInfo)
 }
 
 func handleExtract(w http.ResponseWriter, r *http.Request) {
-	var info detection.GameInfo
+	var info core.GameInfo
 	if err := json.NewDecoder(r.Body).Decode(&info); err != nil {
 		respondError(w, 400, "invalid request")
 		return
@@ -128,13 +145,13 @@ func handleExtract(w http.ResponseWriter, r *http.Request) {
 	if gameName == "" {
 		gameName = filepath.Base(info.GameRoot)
 	}
-	currentProj = project.New(gameName+" — فارسی‌ساز", info.GameRoot, string(info.Engine))
+	currentProj = core.NewProject(gameName+" — فارسی‌ساز", info.GameRoot, string(info.Engine))
 	currentProj.GameName = gameName
 	currentProj.Backend = string(info.Backend)
 	currentProj.Version = info.Version
 
 	// Run extraction
-	err := extract.Run(&info, currentProj, registry)
+	err := extract.Run(r.Context(), &info, currentProj, registry)
 	if err != nil {
 		respondError(w, 500, err.Error())
 		return
@@ -176,9 +193,9 @@ func handleTranslate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	status := project.StatusTranslated
+	status := core.StatusTranslated
 	if req.Translation == "" {
-		status = project.StatusUntranslated
+		status = core.StatusUntranslated
 	}
 
 	if err := currentProj.SetTranslation(req.ID, req.Translation, status); err != nil {
@@ -270,7 +287,7 @@ func handleInject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		GameInfo detection.GameInfo   `json:"game_info"`
+		GameInfo core.GameInfo   `json:"game_info"`
 		Options  map[string]bool      `json:"options"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -281,7 +298,7 @@ func handleInject(w http.ResponseWriter, r *http.Request) {
 	currentInfo = &req.GameInfo
 
 	// Build Persian processing options
-	opts := persian.Options{
+	opts := core.PersianOptions{
 		Reshape:       req.Options["reshape"],
 		BidiReorder:   req.Options["bidi_reorder"],
 		FixYeh:        req.Options["fix_yeh"],
@@ -289,11 +306,11 @@ func handleInject(w http.ResponseWriter, r *http.Request) {
 	}
 	// Set defaults if all false
 	if !opts.Reshape && !opts.BidiReorder && !opts.FixYeh && !opts.PersianDigits {
-		opts = persian.DefaultOptions()
+		opts = core.DefaultPersianOptions()
 	}
 
 	// Run injection
-	modified, err := inject.Run(currentInfo, currentProj, registry, opts)
+	modified, err := inject.Run(r.Context(), currentInfo, currentProj, registry, opts)
 	if err != nil {
 		respondError(w, 500, err.Error())
 		return
@@ -399,7 +416,7 @@ func openBrowser(url string) {
 	cmd.Start()
 }
 
-func uniqueFiles(entries []project.StringEntry) []string {
+func uniqueFiles(entries []core.StringEntry) []string {
 	seen := make(map[string]bool)
 	var files []string
 	for _, e := range entries {

@@ -7,14 +7,14 @@ import (
 	"path/filepath"
 	"strings"
 
-	"farsiforge/pkg/project"
+	"farsiforge/pkg/core"
 
 	"github.com/xuri/excelize/v2"
 )
 
 // ExportXLSX exports project entries to an Excel file for translation.
 // Columns: ID | Source | Translation | Status | Context | File | Path | Notes
-func ExportXLSX(proj *project.Project, outputPath string) error {
+func ExportXLSX(proj *core.Project, outputPath string) error {
 	f := excelize.NewFile()
 	defer f.Close()
 
@@ -83,7 +83,7 @@ func ExportXLSX(proj *project.Project, outputPath string) error {
 }
 
 // ImportXLSX imports translations from an Excel file.
-func ImportXLSX(proj *project.Project, inputPath string) (int, error) {
+func ImportXLSX(proj *core.Project, inputPath string) (int, error) {
 	f, err := excelize.OpenFile(inputPath)
 	if err != nil {
 		return 0, fmt.Errorf("open xlsx: %w", err)
@@ -113,9 +113,9 @@ func ImportXLSX(proj *project.Project, inputPath string) (int, error) {
 			continue
 		}
 
-		status := project.StatusTranslated
+		status := core.StatusTranslated
 		if len(row) > 3 && row[3] != "" {
-			s := project.Status(strings.TrimSpace(row[3]))
+			s := core.Status(strings.TrimSpace(row[3]))
 			if s != "" {
 				status = s
 			}
@@ -130,7 +130,7 @@ func ImportXLSX(proj *project.Project, inputPath string) (int, error) {
 }
 
 // ExportCSV exports project entries to a CSV file.
-func ExportCSV(proj *project.Project, outputPath string) error {
+func ExportCSV(proj *core.Project, outputPath string) error {
 	file, err := os.Create(outputPath)
 	if err != nil {
 		return err
@@ -164,7 +164,7 @@ func ExportCSV(proj *project.Project, outputPath string) error {
 }
 
 // ImportCSV imports translations from a CSV file.
-func ImportCSV(proj *project.Project, inputPath string) (int, error) {
+func ImportCSV(proj *core.Project, inputPath string) (int, error) {
 	file, err := os.Open(inputPath)
 	if err != nil {
 		return 0, err
@@ -198,9 +198,9 @@ func ImportCSV(proj *project.Project, inputPath string) (int, error) {
 		if id == "" || translation == "" {
 			continue
 		}
-		status := project.StatusTranslated
+		status := core.StatusTranslated
 		if len(row) > 3 && row[3] != "" {
-			status = project.Status(row[3])
+			status = core.Status(row[3])
 		}
 		if err := proj.SetTranslation(id, translation, status); err == nil {
 			count++
@@ -211,7 +211,7 @@ func ImportCSV(proj *project.Project, inputPath string) (int, error) {
 }
 
 // Export exports to XLSX or CSV based on file extension.
-func Export(proj *project.Project, outputPath string) error {
+func Export(proj *core.Project, outputPath string) error {
 	ext := strings.ToLower(filepath.Ext(outputPath))
 	switch ext {
 	case ".xlsx":
@@ -224,7 +224,7 @@ func Export(proj *project.Project, outputPath string) error {
 }
 
 // Import imports from XLSX or CSV based on file extension.
-func Import(proj *project.Project, inputPath string) (int, error) {
+func Import(proj *core.Project, inputPath string) (int, error) {
 	ext := strings.ToLower(filepath.Ext(inputPath))
 	switch ext {
 	case ".xlsx":

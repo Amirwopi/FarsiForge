@@ -1,0 +1,104 @@
+@import "tailwindcss";
+
+@plugin "tailwindcss-animate";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --background: oklch(0.98 0.01 240);
+  --foreground: oklch(0.15 0.02 240);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.15 0.02 240);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.15 0.02 240);
+  --primary: oklch(0.2 0.02 240);
+  --primary-foreground: oklch(0.98 0.01 240);
+  --secondary: oklch(0.95 0.02 240);
+  --secondary-foreground: oklch(0.2 0.02 240);
+  --muted: oklch(0.95 0.02 240);
+  --muted-foreground: oklch(0.45 0.02 240);
+  --accent: oklch(0.95 0.02 240);
+  --accent-foreground: oklch(0.2 0.02 240);
+  --destructive: oklch(0.6 0.2 20);
+  --destructive-foreground: oklch(0.98 0.01 240);
+  --border: oklch(0.9 0.02 240);
+  --input: oklch(0.9 0.02 240);
+  --ring: oklch(0.2 0.02 240);
+  --radius: 0.75rem;
+
+  --font-sans: var(--font-vazirmatn), ui-sans-serif, system-ui, sans-serif;
+}
+
+.dark {
+  --background: oklch(0.1 0.02 240);
+  --foreground: oklch(0.95 0.01 240);
+  --card: oklch(0.12 0.02 240);
+  --card-foreground: oklch(0.95 0.01 240);
+  --popover: oklch(0.12 0.02 240);
+  --popover-foreground: oklch(0.95 0.01 240);
+  --primary: oklch(0.6 0.15 260); /* Indigo/Cyberpunk feel */
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.18 0.02 240);
+  --secondary-foreground: oklch(0.95 0.01 240);
+  --muted: oklch(0.18 0.02 240);
+  --muted-foreground: oklch(0.7 0.02 240);
+  --accent: oklch(0.18 0.02 240);
+  --accent-foreground: oklch(0.95 0.01 240);
+  --destructive: oklch(0.45 0.15 20);
+  --destructive-foreground: oklch(0.98 0.01 240);
+  --border: oklch(0.2 0.02 240);
+  --input: oklch(0.2 0.02 240);
+  --ring: oklch(0.6 0.15 260);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --font-sans: var(--font-sans);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* Custom Scrollbar for dark theme */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.2);
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}

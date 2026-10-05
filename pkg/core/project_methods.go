@@ -1,4 +1,4 @@
-package project
+package core
 
 import (
 	"encoding/json"
@@ -8,73 +8,16 @@ import (
 	"time"
 )
 
-// Status represents the translation status of a string entry.
-type Status string
-
-const (
-	StatusUntranslated Status = "untranslated"
-	StatusTranslated   Status = "translated"
-	StatusApproved     Status = "approved"
-	StatusSkipped      Status = "skipped"
-)
-
-// StringEntry represents one translatable string extracted from a game.
-type StringEntry struct {
-	ID          string `json:"id"`
-	Source      string `json:"source"`
-	Translation string `json:"translation"`
-	File        string `json:"file"`       // source file path (relative to game root)
-	Path        string `json:"path"`       // internal path within the file (e.g. asset path, JSON key)
-	Context     string `json:"context"`    // additional context (e.g. "dialogue", "UI", "item name")
-	Status      Status `json:"status"`
-	Character   string `json:"character"`  // speaking character (for dialogue)
-	Notes       string `json:"notes"`      // translator notes
-}
-
-// Project represents a FarsiForge localization project.
-type Project struct {
-	// Metadata
-	Name        string    `json:"name"`
-	GameName    string    `json:"game_name"`
-	GameRoot    string    `json:"game_root"`
-	Engine      string    `json:"engine"`
-	Backend     string    `json:"backend"`
-	Version     string    `json:"version"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
-
-	// State
-	Entries     []StringEntry `json:"entries"`
-	WorkingDir  string        `json:"working_dir"`  // extraction/injection working directory
-
-	// Settings
-	PersianOpts  map[string]bool `json:"persian_opts"`
-	FontPath     string          `json:"font_path"`    // path to Persian font for injection
-	InstallerName string         `json:"installer_name"`
-
-	// File tracking
-	ExtractedFiles []string `json:"extracted_files"` // files extracted from game
-	ModifiedFiles  []string `json:"modified_files"`  // files to inject back
-
-	// Internal
-	projectFile string `json:"-"`
-}
-
-// New creates a new project.
-func New(name, gameRoot, engine string) *Project {
+// NewProject creates a new project.
+func NewProject(name, gameRoot, engine string) *Project {
 	return &Project{
-		Name:      name,
-		GameRoot:  gameRoot,
-		Engine:    engine,
-		Entries:   []StringEntry{},
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
-		PersianOpts: map[string]bool{
-			"reshape":       true,
-			"bidi_reorder":  true,
-			"fix_yeh":       true,
-			"persian_digits": true,
-		},
+		Name:        name,
+		GameRoot:    gameRoot,
+		Engine:      engine,
+		Entries:     []StringEntry{},
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
+		PersianOpts: DefaultPersianOptions(),
 	}
 }
 
@@ -92,8 +35,8 @@ func (p *Project) Save(path string) error {
 	return nil
 }
 
-// Load reads a project from a JSON file.
-func Load(path string) (*Project, error) {
+// LoadProject reads a project from a JSON file.
+func LoadProject(path string) (*Project, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read project file: %w", err)
@@ -161,16 +104,6 @@ func (p *Project) Stats() Stats {
 	return s
 }
 
-// Stats holds translation progress statistics.
-type Stats struct {
-	Total        int     `json:"total"`
-	Untranslated int     `json:"untranslated"`
-	Translated   int     `json:"translated"`
-	Approved     int     `json:"approved"`
-	Skipped      int     `json:"skipped"`
-	Progress     float64 `json:"progress"`
-}
-
 // SetTranslation updates the translation for an entry by ID.
 func (p *Project) SetTranslation(id, translation string, status Status) error {
 	for i := range p.Entries {
@@ -185,7 +118,6 @@ func (p *Project) SetTranslation(id, translation string, status Status) error {
 }
 
 // ImportTranslations merges translations from a map of source → translation.
-// It matches by the source text (original string), not by entry ID.
 func (p *Project) ImportTranslations(translations map[string]string) int {
 	count := 0
 	for i := range p.Entries {
@@ -223,10 +155,14 @@ func (p *Project) GroupByContext() map[string][]StringEntry {
 	return groups
 }
 
-// WorkingDir returns the working directory, creating it if needed.
+// EnsureWorkingDir returns the working directory, creating it if needed.
 func (p *Project) EnsureWorkingDir() (string, error) {
 	if p.WorkingDir == "" {
-		p.WorkingDir = filepath.Join(filepath.Dir(p.projectFile), "work")
+		if p.projectFile != "" {
+			p.WorkingDir = filepath.Join(filepath.Dir(p.projectFile), "work")
+		} else {
+			p.WorkingDir = filepath.Join(os.TempDir(), "farsiforge_work")
+		}
 	}
 	if err := os.MkdirAll(p.WorkingDir, 0755); err != nil {
 		return "", fmt.Errorf("create working dir: %w", err)

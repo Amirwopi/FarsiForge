@@ -1,119 +1,75 @@
-# 🔨 FarsiForge — فارسی‌ساز بازی
+# FarsiForge (فارسی‌فورج) 🚀
 
-<p align="center">
-  <strong>ابزار حرفه‌ای فارسی‌سازی و بومی‌سازی بازی‌های ویدیویی</strong>
-</p>
+FarsiForge is an advanced, production-ready localization and patching framework designed specifically to bring Persian (Farsi) support to video games. It automates the complex pipeline of detecting game engines, extracting text assets, fixing RTL (Right-to-Left) text shaping, and safely injecting translations back into the game.
 
-<p align="center" dir="rtl">
-  استخراج متن • ترجمه • پردازش راست‌به‌چپ • تزریق • ساخت نصاب
-</p>
+## 🌟 Features
+
+- **Automated Engine Detection**: Dynamically scans game directories to detect engines (Unity, Unreal, Godot) with a high-confidence scoring system.
+- **Plugin-Based Architecture**: Extractor and Injector logic is strictly decoupled. Adding support for a new engine (e.g., RPGMaker, RenPy) is as simple as dropping in a new plugin.
+- **Robust Safety Mechanisms**: Employs SHA-256 hashing and sidecar backups. It never modifies original game files without a secure rollback point.
+- **Advanced Persian Text Processing**: Built-in logic for:
+  - RTL (Right-to-Left) BiDi reordering.
+  - Arabic/Persian Glyph Reshaping (contextual forms).
+  - Arabic Yeh/Kaf to Persian Yeh/Kaf normalization.
+  - Persian digit conversion.
+- **Professional UI/UX**: Includes a high-end Glassmorphism Cyberpunk React/Next.js dashboard for seamless visual interaction.
+- **Headless CLI**: Includes a lightning-fast CLI for automated pipelines and debugging.
 
 ---
 
-## معرفی
+## 🛠️ Getting Started
 
-FarsiForge یک ابزار متن‌باز برای ساده‌تر کردن فرآیند فارسی‌سازی بازی‌های ویدیویی است. این ابزار به‌صورت خودکار موتور بازی‌سازی را تشخیص می‌دهد، متن‌ها و دیالوگ‌های بازی را استخراج می‌کند، و پس از ترجمه، ترجمه‌ها را با پردازش صحیح راست‌به‌چپ و شکل‌دهی حروف فارسی در بازی تزریق می‌کند. در نهایت یک نصاب/لانچر (`installer.exe`) می‌سازد که می‌توانید آن را برای دیگران منتشر کنید.
+### 1. Requirements
+- **Go 1.21+** (for building the core engine)
+- **Node.js 20+** (for the UI dashboard)
+- **External Tools**: UnityPy, UnrealLocres, gdre_tools (Place inside `Tools/` directory if needed for specific engines).
 
-## موتورهای پشتیبانی‌شده
+### 2. Building the Project
 
-| موتور | تشخیص | استخراج | تزریق | نسخه |
-|-------|:-----:|:-------:|:-----:|------|
-| Unity (Mono/IL2CPP) | ✅ | ✅ UnityPy | ✅ | همه نسخه‌ها |
-| Unreal Engine | ✅ | ✅ UnrealLocres | ✅ | UE4/UE5 |
-| Godot | ✅ | ✅ gdre_tools | ⚠️ | 3.x/4.x |
-| RPG Maker MV/MZ | ✅ | ✅ بومی | ✅ | MV/MZ |
-| GameMaker | ✅ | ⚠️ UndertaleModTool | ⚠️ | GMS1/2 |
-| Ren'Py | ✅ | ✅ بومی | ✅ | — |
-| Source / GoldSrc | ✅ | ✅ بومی | ✅ | — |
-| Adobe AIR | ✅ | ✅ بومی | ✅ | — |
-| Generic Text Files | — | ✅ بومی | ✅ | — |
-
-## امکانات
-
-- **تشخیص خودکار موتور بازی** با بررسی ساختار پوشه و فایل‌های مشخصه
-- **استخراج متن و دیالوگ** از انواع فرمت‌های بازی
-- **ویرایشگر ترجمه داخلی** با پیش‌نمایش زنده
-- **خروجی/ایمپورت Excel (XLSX) و CSV** برای ترجمه تیمی
-- **پردازش حروف فارسی**: شکل‌دهی (Reshape)، مرتب‌سازی راست‌به‌چپ (BiDi)، اصلاح ی/ک فارسی، اعداد فارسی
-- **ساخت نصاب/لانچر**: یک فایل `installer.exe` مستقل با منوی فارسی
-- **پشتیبانی از فونت**: تزریق خودکار فونت فارسی (Vazirmatn)
-- **رابط کاربری وب** با طراحی مدرن و راست‌به‌چپ
-
-## نصب و اجرا
-
-### پیش‌نیازها
-
-- [Go 1.21+](https://go.dev/dl/)
-- [Python 3.10+](https://www.python.org/) با پکیج‌های:
-  ```bash
-  pip install UnityPy arabic-reshaper python-bidi fonttools openpyxl
-  ```
-
-### ساخت از سورس
-
-```bash
-git clone https://github.com/Amirwopi/FarsiForge.git
-cd FarsiForge
-go build -o bin/farsiforge.exe ./cmd/farsiforge
+Compile the Go binaries to the `bin/` folder:
+```powershell
+mkdir bin
+go build -o bin/farsiforge-api.exe ./cmd/farsiforge
+go build -o bin/farsiforge-cli.exe ./cmd/farsiforge-cli
 ```
 
-### اجرا
-
-```bash
-bin/farsiforge.exe
+Build the Frontend UI:
+```powershell
+cd frontend
+npm install
+npm run build
 ```
 
-برنامه در مرورگر باز می‌شود: `http://127.0.0.1:7842`
+---
 
-## مراحل استفاده
+## 💻 Usage
 
-۱. **انتخاب بازی** — مسیر پوشه بازی را وارد کنید
-۲. **تشخیص موتور** — موتور و نسخه بازی‌سازی به‌صورت خودکار شناسایی می‌شود
-۳. **استخراج متن** — متن‌های قابل ترجمه استخراج می‌شوند
-۴. **ترجمه** — متن‌ها را در ویرایشگر داخلی یا Excel ترجمه کنید
-۵. **تزریق** — ترجمه‌ها با پردازش راست‌به‌چپ در بازی جایگزین می‌شوند
-۶. **ساخت نصاب** — فایل `installer.exe` برای انتشار ساخته می‌شود
+### Option 1: Modern Web Dashboard (Recommended)
+Launch the API and the Next.js frontend:
+```powershell
+# 1. Start the API
+.\bin\farsiforge-api.exe
 
-## ابزارهای مورد استفاده
-
-FarsiForge از ابزارهای متن‌باز زیر استفاده می‌کند:
-
-| ابزار | کاربرد |
-|-------|--------|
-| [UnityPy](https://github.com/K0lb3/UnityPy) | استخراج و تزریق متن از Unity |
-| [UnrealLocres](https://github.com/amrshaheen/UnrealLocres) | استخراج .locres اونریل |
-| [gdre_tools](https://github.com/bruvzg/gdsdecomp) | استخراج PCK گودو |
-| [UndertaleModTool](https://github.com/UnderminersTeam/UndertaleModTool) | استخراج data.win گیدمیکر |
-| [Vazirmatn](https://github.com/rastikerdar/vazirmatn) | فونت فارسی |
-| [Detect It Easy](https://github.com/horsicq/Detect-It-Easy) | تحلیل باینری |
-| [repak](https://github.com/trumank/repak) | باز/بسته کردن .pak اونریل |
-
-## ساختار پروژه
-
+# 2. Start the UI
+cd frontend
+npm run dev
 ```
-FarsiForge/
-├── cmd/
-│   ├── farsiforge/          # برنامه اصلی (سرور وب + رابط کاربری)
-│   │   ├── main.go
-│   │   └── web/             # رابط کاربری (HTML/CSS/JS)
-│   └── farsiforge-installer/  # قالب نصاب/لانچر
-│       └── main.go
-├── pkg/
-│   ├── persian/             # پردازش متن فارسی (Reshape, BiDi, ارقام)
-│   ├── detection/           # تشخیص موتور بازی
-│   ├── extract/             # استخراج متن از بازی‌ها
-│   ├── inject/              # تزریق ترجمه به بازی‌ها
-│   ├── exchange/            # خروجی/ایمپورت XLSX/CSV
-│   ├── installer/           # ساخت نصاب
-│   ├── project/             # مدیریت پروژه
-│   └── tools/               # کشف و مدیریت ابزارها
-└── web/                     # فایل‌های رابط کاربری
+Open `http://localhost:3000` to access the FarsiForge Wizard.
+
+### Option 2: Command Line Interface (CLI)
+For developers or automated environments, use the CLI to run the full pipeline safely:
+```powershell
+.\bin\farsiforge-cli.exe -dir "D:\Path\To\Game" -action pipeline
 ```
 
-## مشارکت
+---
 
-این پروژه متن‌باز است و از مشارکت استقبال می‌کند. اگر برنامه‌نویس، مترجم، Modder یا علاقه‌مند به فارسی‌سازی بازی‌ها هستید، می‌توانید در توسعه مشارکت کنید.
+## 🏗️ Architecture
+- `pkg/core`: Core data models and plugin interfaces (`IExtractor`, `IInjector`).
+- `pkg/detection`: Registry-based engine signature scanner.
+- `pkg/extract` & `pkg/inject`: Implementation of extraction/injection logic per engine.
+- `pkg/persian`: Standardized Persian string manipulation.
+- `pkg/backup`: Transactional backup manager with SHA256 integrity.
 
-## لایسنس
-
-MIT License
+## 🤝 Contributing
+FarsiForge uses a strict Registry Pattern. To add a new engine, implement the `core.IExtractor` and `core.IInjector` interfaces and register them in their respective packages. No `switch/case` hardcoding is allowed!
