@@ -13,7 +13,6 @@ func TestIsGodotText(t *testing.T) {
 		// Real text — keep
 		{"You should visit Dr. Lee. She is a good soul.", true},
 		{"GodotSteam GDExtension updater functionality enabled", true},
-		{"GodotSteam v%s | %s | %s", true},
 		{"Install", true},
 		{"Cancel", true},
 		{"Up-to-date", true},
@@ -23,6 +22,9 @@ func TestIsGodotText(t *testing.T) {
 		{"uid://cbjdca3iwlx36", false},
 		{"[url=https://godotsteam.com]website[/url]", false},
 		{"steam/updates/godotsteam/check_for_updates", false},
+		// Version chrome — no translatable word ("GodotSteam" camelCase,
+		// "v" single letter, the rest is %s placeholders and pipes).
+		{"GodotSteam v%s | %s | %s", false},
 		// Keys / identifiers — skip
 		{"DEMO_DIALOG_54", false},
 		{"dialogue_node_54", false},

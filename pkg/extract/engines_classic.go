@@ -11,6 +11,7 @@ import (
 
 	"farsiforge/pkg/core"
 	"farsiforge/pkg/scanner"
+	"farsiforge/pkg/textfilter"
 )
 
 // ── Valve KeyValues parser (GoldSrc / Source 2) ────────────────────
@@ -78,23 +79,16 @@ func unquoteKV(s string) string {
 	return s
 }
 
-// isKVText rejects non-translatable values (language names, empty strings).
+// isKVText rejects non-translatable values (language names are harmless, but
+// token refs, identifiers, filenames and markup-only strings are skipped).
+// The check is placeholder-aware (pkg/textfilter): values like
+// "Insert __1__ into __2__" or "Press {button} to continue" are kept.
 func isKVText(s string) bool {
 	s = strings.TrimSpace(s)
-	if len(s) < 1 {
+	if s == "" {
 		return false
 	}
-	hasLetter := false
-	for _, c := range s {
-		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
-			hasLetter = true
-			break
-		}
-	}
-	if !hasLetter {
-		return false
-	}
-	return true
+	return textfilter.IsTranslatable(s)
 }
 
 // ── Lua table parser (Project Zomboid) ─────────────────────────────
@@ -653,6 +647,11 @@ func extractManifestText(data []byte) []string {
 			return
 		}
 		if !strings.Contains(s, " ") && letters < 6 {
+			return
+		}
+		// Final shared gate: reject identifiers, filenames and markup-only
+		// runs that slip past the manifest-specific heuristics.
+		if !textfilter.IsTranslatable(s) {
 			return
 		}
 		seen[s] = true

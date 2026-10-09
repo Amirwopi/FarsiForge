@@ -12,6 +12,7 @@ import (
 
 	"farsiforge/pkg/core"
 	"farsiforge/pkg/scanner"
+	"farsiforge/pkg/textfilter"
 	"farsiforge/pkg/tools"
 )
 
@@ -285,6 +286,14 @@ func (e *UnrealExtractor) exportLocresFile(ctx context.Context, proj *core.Proje
 		}
 		key, source := row[0], row[1]
 		if source == "" {
+			continue
+		}
+		// Official locres tables also carry engine chrome that must never be
+		// translated (resolution names, key labels, format-only strings:
+		// "1080p24", "N/A", "F10", "Date/Time"). Skipping them here is safe:
+		// locres import merges translations into the original file, so
+		// untranslated keys keep their English value.
+		if !textfilter.IsTranslatable(source) {
 			continue
 		}
 		proj.AddEntry(core.StringEntry{

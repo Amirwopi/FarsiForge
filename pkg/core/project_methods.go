@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"farsiforge/pkg/textfilter"
 )
 
 // NewProject creates a new project.
@@ -104,12 +106,16 @@ func (p *Project) Stats() Stats {
 	return s
 }
 
-// SetTranslation updates the translation for an entry by ID.
+// SetTranslation updates the translation for an entry by ID. The entry's
+// Notes field records any automatic QA findings (missing placeholders, tag
+// mismatches, …) from comparing the translation against its source; an
+// empty translation is flagged as EMPTY_TRANSLATION.
 func (p *Project) SetTranslation(id, translation string, status Status) error {
 	for i := range p.Entries {
 		if p.Entries[i].ID == id {
 			p.Entries[i].Translation = translation
 			p.Entries[i].Status = status
+			p.Entries[i].Notes = textfilter.QANotes(textfilter.QA(p.Entries[i].Source, translation))
 			p.UpdatedAt = time.Now()
 			return nil
 		}
@@ -118,6 +124,7 @@ func (p *Project) SetTranslation(id, translation string, status Status) error {
 }
 
 // ImportTranslations merges translations from a map of source → translation.
+// Each merged entry gets automatic QA notes, same as SetTranslation.
 func (p *Project) ImportTranslations(translations map[string]string) int {
 	count := 0
 	for i := range p.Entries {
@@ -126,6 +133,7 @@ func (p *Project) ImportTranslations(translations map[string]string) int {
 			if p.Entries[i].Status == StatusUntranslated {
 				p.Entries[i].Status = StatusTranslated
 			}
+			p.Entries[i].Notes = textfilter.QANotes(textfilter.QA(p.Entries[i].Source, tr))
 			count++
 		}
 	}

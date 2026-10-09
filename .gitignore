@@ -31,6 +31,9 @@ Thumbs.db
 *.bak
 *~
 
+# Generated knowledge graph (graphify)
+graphify-out/
+
 # Test artifacts
 test_game/
 test_output/

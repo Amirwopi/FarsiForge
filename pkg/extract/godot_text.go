@@ -3,6 +3,8 @@ package extract
 import (
 	"regexp"
 	"strings"
+
+	"farsiforge/pkg/textfilter"
 )
 
 // ── Godot text-file string extraction ──────────────────────────────
@@ -83,25 +85,27 @@ func godotUnescape(s string) string {
 }
 
 // isGodotText reports whether s looks like translatable game text rather
-// than a path, uid, key, identifier, or bbcode fragment.
+// than a path, uid, key, identifier, or markup-only fragment.
+//
+// Any string containing '/' or '\' is rejected outright — .tres/.tscn/.gd
+// files are full of res:// paths, uids and URLs, and even bbcode like
+// "[url=https://x.com]…[/url]" carries the URL in the markup. Markup around
+// real text is kept only when the markup itself is slash-free
+// ("Click [url=www.x.com]here[/url]"); the shared textfilter gate then
+// rejects pure markup, identifiers, filenames, hashes and digit noise.
 func isGodotText(s string) bool {
 	s = strings.TrimSpace(s)
 	if len(s) < 2 {
 		return false
 	}
-	// Paths, uids (uid://...), and bbcode ([url=...]...) are not text.
-	if strings.ContainsAny(s, "/\\[]") {
+	// Paths and uids (uid://..., res://...) are not text.
+	if strings.ContainsAny(s, "/\\") {
 		return false
 	}
 
-	hasLetter := false
-	for _, c := range s {
-		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
-			hasLetter = true
-			break
-		}
-	}
-	if !hasLetter {
+	// Shared quality gate: rejects pure markup ({PW_Axe}, [{PWSkill1}],
+	// <cf></cf>), identifiers, filenames, hashes, and digit noise.
+	if !textfilter.IsTranslatable(s) {
 		return false
 	}
 

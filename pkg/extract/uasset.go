@@ -3,6 +3,8 @@ package extract
 import (
 	"regexp"
 	"strings"
+
+	"farsiforge/pkg/textfilter"
 )
 
 // ueTextLikelyDirRe matches pak directories likely to contain UI/text
@@ -11,7 +13,7 @@ var ueTextLikelyDirRe = regexp.MustCompile(`(?i)(^|/)(ui|widgets?|interface|data
 
 // ueAssetDirRe matches pak directories that hold graphics/audio/environment
 // assets — these are skipped even when a sub-path matches the text regex.
-var ueAssetDirRe = regexp.MustCompile(`(?i)(^|/)(textures?|materials?|meshes?|sounds?|audio|movies?|animations?|megascans|environments?|landscape|foliage|lights?|particles?|physics|collision|vfx|nanite|characters?|weapons?|furniture|houses?|hotels?|hospitals?|offices?|schools?|clubs?|stations?|level\d*|maps|props)(/|$)`)
+var ueAssetDirRe = regexp.MustCompile(`(?i)(^|/)(textures?|materials?|meshes?|sounds?|audio|movies?|animations?|megascans|environments?|landscape|foliage|lights?|particles?|physics|collision|vfx|nanite|characters?|weapons?|furniture|houses?|hotels?|hospitals?|offices?|schools?|clubs?|stations?|level\d*|maps|props|images?|screenshots?|icons?|svgs?|fonts?)(/|$)`)
 
 // isUETextPath reports whether a pak entry path is a .uexp likely to contain
 // translatable text: it must be under a text-likely directory, must not sit
@@ -61,6 +63,12 @@ func extractUexpStrings(data []byte) []string {
 
 // isText reports whether s looks like translatable natural-language text
 // rather than an asset name, path, hex key, or binary noise.
+//
+// The check is placeholder-aware (pkg/textfilter): strings like
+// "Reduce damage intake by {GetThreshouldBVar_1}% when casting" are kept —
+// the underscore inside the placeholder no longer disqualifies the whole
+// string — while pure identifiers ({PW_Axe}, Data_Table, RowName) and
+// markup-only strings are rejected.
 func isText(s string) bool {
 	if len(s) < 4 {
 		return false
@@ -68,28 +76,7 @@ func isText(s string) bool {
 	if isHexKey(s) {
 		return false
 	}
-
-	hasLetter := false
-	hasSpace := false
-	for _, c := range s {
-		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
-			hasLetter = true
-		}
-		if c == ' ' {
-			hasSpace = true
-		}
-		// Asset names and paths use underscores/slashes — not translatable.
-		if c == '_' || c == '/' || c == '\\' {
-			return false
-		}
-	}
-	if !hasLetter {
-		return false
-	}
-	// Natural-language text almost always contains spaces. Single-word
-	// labels are rare in this engine's exports and are dominated by noise,
-	// so we require a space to keep precision high.
-	return hasSpace
+	return textfilter.IsTranslatable(s)
 }
 
 // isHexKey reports whether s is a 32-character hexadecimal string (the MD5
