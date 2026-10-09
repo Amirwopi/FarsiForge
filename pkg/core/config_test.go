@@ -19,12 +19,6 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.TempDir == "" {
 		t.Error("TempDir should not be empty")
 	}
-	if cfg.ListenAddr == "" {
-		t.Error("ListenAddr should not be empty")
-	}
-	if cfg.ListenPort <= 0 {
-		t.Error("ListenPort should be positive")
-	}
 	if cfg.MaxFileSizeMB <= 0 {
 		t.Error("MaxFileSizeMB should be positive")
 	}
@@ -47,14 +41,6 @@ func TestDefaultConfig_PythonExeEnvOverride(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg.PythonExe != "/custom/python3.11" {
 		t.Errorf("PythonExe = %q, want %q", cfg.PythonExe, "/custom/python3.11")
-	}
-}
-
-func TestDefaultConfig_ListenPortEnvOverride(t *testing.T) {
-	t.Setenv(EnvListenPort, "9999")
-	cfg := DefaultConfig()
-	if cfg.ListenPort != 9999 {
-		t.Errorf("ListenPort = %d, want 9999", cfg.ListenPort)
 	}
 }
 
@@ -88,6 +74,55 @@ func TestDefaultConfig_ProjectRootEnvOverride(t *testing.T) {
 	}
 }
 
+func TestFindProjectRootUsesExactModuleName(t *testing.T) {
+	t.Run("finds nested FarsiForge checkout", func(t *testing.T) {
+		root := t.TempDir()
+		nested := filepath.Join(root, "work")
+		if err := os.MkdirAll(nested, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module farsiforge\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := findProjectRootFrom(nested); got != root {
+			t.Fatalf("findProjectRootFrom() = %q, want %q", got, root)
+		}
+	})
+
+	t.Run("does not match similarly named modules", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module github.com/Amirwopi/farsiforge-tools\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := findProjectRootFrom(root); got != "" {
+			t.Fatalf("findProjectRootFrom() = %q, want no match", got)
+		}
+	})
+}
+
+func TestDefaultGameSearchPathsUsesConfiguredSteamLibraries(t *testing.T) {
+	temp := t.TempDir()
+	lib := filepath.Join(temp, "library")
+	common := filepath.Join(lib, "steamapps", "common")
+	if err := os.MkdirAll(common, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"STEAM_PATH", "ProgramFiles", "ProgramFiles(x86)"} {
+		t.Setenv(key, "")
+	}
+	t.Setenv("STEAM_LIBRARY_PATHS", lib+string(os.PathListSeparator)+lib)
+	got := defaultGameSearchPaths(filepath.Join(temp, "home"))
+	count := 0
+	for _, candidate := range got {
+		if candidate == common {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("defaultGameSearchPaths() = %#v, expected %q exactly once", got, common)
+	}
+}
+
 func TestSaveAndLoadConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
@@ -113,8 +148,7 @@ func TestLoadConfig_NonexistentFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig should not error on missing file: %v", err)
 	}
-	// Should return defaults
-	if cfg.ListenPort <= 0 {
-		t.Error("should return default config with valid ListenPort")
+	if cfg.MaxScanDepth <= 0 {
+		t.Error("missing config should return defaults")
 	}
 }

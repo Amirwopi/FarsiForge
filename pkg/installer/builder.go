@@ -9,11 +9,10 @@
 package installer
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -85,6 +84,9 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 	if len(cfg.Targets) == 0 {
 		return nil, fmt.Errorf("installer: no patch targets provided")
 	}
+	if err := validateBuildConfig(cfg); err != nil {
+		return nil, err
+	}
 
 	if err := os.MkdirAll(cfg.OutputDir, 0o755); err != nil {
 		return nil, fmt.Errorf("installer: create output dir: %w", err)
@@ -100,7 +102,10 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 	result.PatchFile = patchPath
 
 	// 2. Stage the patcher binary alongside the patch.
-	if cfg.PatcherExe != "" && fileExists(cfg.PatcherExe) {
+	if cfg.PatcherExe != "" {
+		if !fileExists(cfg.PatcherExe) {
+			return result, fmt.Errorf("installer: patcher executable not found: %s", cfg.PatcherExe)
+		}
 		dst := filepath.Join(cfg.OutputDir, PatcherExeName)
 		if err := copyFile(cfg.PatcherExe, dst); err != nil {
 			return result, fmt.Errorf("installer: stage patcher exe: %w", err)
@@ -109,42 +114,76 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 	}
 
 	// 3. Copy font file if provided.
-	if cfg.FontFile != "" && fileExists(cfg.FontFile) {
-		fontDir := filepath.Join(cfg.OutputDir, "font")
-		if err := os.MkdirAll(fontDir, 0o755); err == nil {
-			fontDst := filepath.Join(fontDir, filepath.Base(cfg.FontFile))
-			if err := copyFile(cfg.FontFile, fontDst); err == nil {
-				result.FontInstalled = true
-			}
+	if cfg.FontFile != "" {
+		if !fileExists(cfg.FontFile) {
+			return result, fmt.Errorf("installer: font file not found: %s", cfg.FontFile)
 		}
+		fontDir := filepath.Join(cfg.OutputDir, "font")
+		if err := os.MkdirAll(fontDir, 0o755); err != nil {
+			return result, fmt.Errorf("installer: create font directory: %w", err)
+		}
+		fontDst := filepath.Join(fontDir, filepath.Base(cfg.FontFile))
+		if err := copyFile(cfg.FontFile, fontDst); err != nil {
+			return result, fmt.Errorf("installer: stage font: %w", err)
+		}
+		result.FontInstalled = true
 	}
 
 	// 4. Write a README.
-	writeReadme(cfg, result)
+	if err := writeReadme(cfg, result); err != nil {
+		return result, fmt.Errorf("installer: write README: %w", err)
+	}
 
 	return result, nil
+}
+
+func validateBuildConfig(cfg BuildConfig) error {
+	if cfg.PatcherExe != "" && !fileExists(cfg.PatcherExe) {
+		return fmt.Errorf("installer: patcher executable not found: %s", cfg.PatcherExe)
+	}
+	if cfg.FontFile != "" && !fileExists(cfg.FontFile) {
+		return fmt.Errorf("installer: font file not found: %s", cfg.FontFile)
+	}
+	for i, target := range cfg.Targets {
+		if !fileExists(target.PatchedFile) {
+			return fmt.Errorf("installer: target %d file not found: %s", i, target.PatchedFile)
+		}
+		gamePath := target.GamePath
+		if gamePath == "" && cfg.GameRoot != "" && filepath.IsAbs(target.PatchedFile) {
+			var err error
+			gamePath, err = filepath.Rel(cfg.GameRoot, target.PatchedFile)
+			if err != nil {
+				return fmt.Errorf("installer: resolve target %d game path: %w", i, err)
+			}
+		}
+		if gamePath == "" {
+			gamePath = filepath.Base(target.PatchedFile)
+		}
+		if _, err := cleanGamePath(gamePath); err != nil {
+			return fmt.Errorf("installer: invalid target %d game path %q: %w", i, gamePath, err)
+		}
+	}
+	return nil
 }
 
 // writeFFP1Patch streams an FFP1 patch to patchPath. Each target is added as
 // a ModeReplace target with a single embedded payload (the full patched file
 // content). Final sha256/size are computed automatically by the writer.
-func writeFFP1Patch(patchPath string, cfg BuildConfig) error {
+func writeFFP1Patch(patchPath string, cfg BuildConfig) (retErr error) {
 	f, err := os.Create(patchPath)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); retErr == nil && err != nil {
+			retErr = fmt.Errorf("close patch file: %w", err)
+		}
+	}()
 
 	w, err := ffpatch.NewWriter(f)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if err == nil {
-			err = w.Close()
-		}
-	}()
-
 	w.SetMetadata(ffpatch.Metadata{
 		PatchName:    orDefault(cfg.PatchName, "FarsiForge Patch"),
 		GameName:     filepath.Base(orDefault(cfg.GameRoot, ".")),
@@ -166,6 +205,10 @@ func writeFFP1Patch(patchPath string, cfg BuildConfig) error {
 		}
 		// Normalize to forward slashes for cross-platform consistency.
 		gamePath = filepath.ToSlash(gamePath)
+		gamePath, err = cleanGamePath(gamePath)
+		if err != nil {
+			return fmt.Errorf("invalid game path %q: %w", t.GamePath, err)
+		}
 
 		data, err := os.ReadFile(t.PatchedFile)
 		if err != nil {
@@ -179,11 +222,27 @@ func writeFFP1Patch(patchPath string, cfg BuildConfig) error {
 		target.AddPayload(gamePath, data)
 	}
 
+	if err := w.Close(); err != nil {
+		return fmt.Errorf("finalize patch: %w", err)
+	}
 	return nil
 }
 
+func cleanGamePath(name string) (string, error) {
+	name = strings.ReplaceAll(name, "\\", "/")
+	if name == "" || strings.ContainsRune(name, 0) || path.IsAbs(name) {
+		return "", fmt.Errorf("path must be relative")
+	}
+	clean := path.Clean(name)
+	first := strings.SplitN(clean, "/", 2)[0]
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.Contains(first, ":") {
+		return "", fmt.Errorf("path must stay inside the game directory")
+	}
+	return clean, nil
+}
+
 // writeReadme writes a bilingual README.txt into the output directory.
-func writeReadme(cfg BuildConfig, result *BuildResult) {
+func writeReadme(cfg BuildConfig, result *BuildResult) error {
 	readme := fmt.Sprintf(`%s — فارسی‌ساز
 ================================
 
@@ -230,17 +289,21 @@ Uninstall:
 		PatcherExeName, PatcherExeName, PatcherExeName, PatcherExeName,
 	)
 
-	_ = os.WriteFile(filepath.Join(cfg.OutputDir, "README.txt"), []byte(readme), 0o644)
+	return os.WriteFile(filepath.Join(cfg.OutputDir, "README.txt"), []byte(readme), 0o644)
 }
 
 // ── helpers ─────────────────────────────────────────────────────────
 
-func copyFile(src, dst string) error {
+func copyFile(src, dst string) (retErr error) {
 	srcFile, err := os.Open(src)
 	if err != nil {
 		return err
 	}
-	defer srcFile.Close()
+	defer func() {
+		if err := srcFile.Close(); retErr == nil && err != nil {
+			retErr = fmt.Errorf("close source file: %w", err)
+		}
+	}()
 
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
@@ -250,7 +313,11 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer dstFile.Close()
+	defer func() {
+		if err := dstFile.Close(); retErr == nil && err != nil {
+			retErr = fmt.Errorf("close destination file: %w", err)
+		}
+	}()
 
 	_, err = io.Copy(dstFile, srcFile)
 	return err
@@ -259,20 +326,6 @@ func copyFile(src, dst string) error {
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
-}
-
-// sha256Hex returns the hex-encoded SHA-256 of a file, or "" on error.
-func sha256Hex(path string) string {
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return ""
-	}
-	return hex.EncodeToString(h.Sum(nil))
 }
 
 func orDefault(s, def string) string {

@@ -85,7 +85,6 @@ type Writer struct {
 	targets []*Target
 	blob    bytes.Buffer
 	closed  bool
-	headerW bool
 }
 
 // NewWriter creates a new FFP1 writer writing to w. SetMetadata must be
@@ -109,6 +108,9 @@ func (w *Writer) SetMetadata(m Metadata) {
 func (w *Writer) AddTarget(path string, mode Mode) (*Target, error) {
 	if w.closed {
 		return nil, errors.New("ffpatch: writer closed")
+	}
+	if mode != ModeRebuild && mode != ModeReplace {
+		return nil, fmt.Errorf("ffpatch: unsupported target mode %d", mode)
 	}
 	t := &Target{path: path, mode: mode}
 	w.targets = append(w.targets, t)
@@ -220,55 +222,114 @@ func (w *Writer) Close() error {
 	// 2. write header.
 	var hdr bytes.Buffer
 	hdr.WriteString("FFP1")
-	binary.Write(&hdr, binary.LittleEndian, uint32(1)) // version
+	if err := writeU32(&hdr, 1); err != nil {
+		return fmt.Errorf("ffpatch: write version: %w", err)
+	}
 
-	writeStr(&hdr, w.meta.PatchName)
-	writeStr(&hdr, w.meta.GameName)
-	writeStr(&hdr, w.meta.GameExe)
-	writeStr(&hdr, w.meta.Engine)
-	writeStr(&hdr, w.meta.PatchVersion)
-	writeStr(&hdr, w.meta.Author)
-	writeStr(&hdr, w.meta.Description)
-	writeStr(&hdr, w.meta.CreatedAt)
+	for _, value := range []string{w.meta.PatchName, w.meta.GameName, w.meta.GameExe, w.meta.Engine, w.meta.PatchVersion, w.meta.Author, w.meta.Description, w.meta.CreatedAt} {
+		if err := writeStr(&hdr, value); err != nil {
+			return fmt.Errorf("ffpatch: write metadata: %w", err)
+		}
+	}
 
-	binary.Write(&hdr, binary.LittleEndian, uint32(len(w.targets)))
-	binary.Write(&hdr, binary.LittleEndian, int64(w.blob.Len()))
+	if err := writeU32(&hdr, uint32(len(w.targets))); err != nil {
+		return fmt.Errorf("ffpatch: write target count: %w", err)
+	}
+	if err := writeI64(&hdr, int64(w.blob.Len())); err != nil {
+		return fmt.Errorf("ffpatch: write blob size: %w", err)
+	}
 
 	// 3. write targets + records.
 	for _, t := range w.targets {
-		writeStr(&hdr, t.path)
+		if err := writeStr(&hdr, t.path); err != nil {
+			return fmt.Errorf("ffpatch: write target path: %w", err)
+		}
 		hdr.WriteByte(byte(t.mode))
-		binary.Write(&hdr, binary.LittleEndian, t.finalSize)
+		if err := writeI64(&hdr, t.finalSize); err != nil {
+			return fmt.Errorf("ffpatch: write target size: %w", err)
+		}
 		hdr.Write(t.sha256)
-		binary.Write(&hdr, binary.LittleEndian, uint32(len(t.records)))
+		if err := writeU32(&hdr, uint32(len(t.records))); err != nil {
+			return fmt.Errorf("ffpatch: write record count: %w", err)
+		}
 		for _, r := range t.records {
-			writeStr(&hdr, r.path)
+			if err := writeStr(&hdr, r.path); err != nil {
+				return fmt.Errorf("ffpatch: write record path: %w", err)
+			}
 			hdr.WriteByte(r.src)
 			if r.src == 0 {
-				writeStr(&hdr, r.basePath)
-				binary.Write(&hdr, binary.LittleEndian, r.offset)
-				binary.Write(&hdr, binary.LittleEndian, r.size)
+				if err := writeStr(&hdr, r.basePath); err != nil {
+					return fmt.Errorf("ffpatch: write base path: %w", err)
+				}
+				if err := writeI64(&hdr, r.offset); err != nil {
+					return fmt.Errorf("ffpatch: write base offset: %w", err)
+				}
+				if err := writeI64(&hdr, r.size); err != nil {
+					return fmt.Errorf("ffpatch: write base size: %w", err)
+				}
 			} else {
-				binary.Write(&hdr, binary.LittleEndian, r.payloadOfs)
-				binary.Write(&hdr, binary.LittleEndian, r.zSize)
-				binary.Write(&hdr, binary.LittleEndian, r.rawSize)
+				if err := writeI64(&hdr, r.payloadOfs); err != nil {
+					return fmt.Errorf("ffpatch: write payload offset: %w", err)
+				}
+				if err := writeI64(&hdr, r.zSize); err != nil {
+					return fmt.Errorf("ffpatch: write compressed size: %w", err)
+				}
+				if err := writeI64(&hdr, r.rawSize); err != nil {
+					return fmt.Errorf("ffpatch: write raw size: %w", err)
+				}
 			}
 			hdr.Write(r.md5)
 		}
 	}
 
 	// 4. write header then blob.
-	if _, err := w.w.Write(hdr.Bytes()); err != nil {
+	if err := writeAll(w.w, hdr.Bytes()); err != nil {
 		return fmt.Errorf("ffpatch: write header: %w", err)
 	}
-	if _, err := w.w.Write(w.blob.Bytes()); err != nil {
+	if err := writeAll(w.w, w.blob.Bytes()); err != nil {
 		return fmt.Errorf("ffpatch: write blob: %w", err)
 	}
 	return nil
 }
 
-func writeStr(w io.Writer, s string) {
+func writeAll(w io.Writer, data []byte) error {
+	for len(data) > 0 {
+		n, err := w.Write(data)
+		if n < 0 || n > len(data) {
+			return errors.New("ffpatch: writer returned an invalid byte count")
+		}
+		if n > 0 {
+			data = data[n:]
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+	}
+	return nil
+}
+
+func writeU32(w io.Writer, value uint32) error {
+	var data [4]byte
+	binary.LittleEndian.PutUint32(data[:], value)
+	return writeAll(w, data[:])
+}
+
+func writeI64(w io.Writer, value int64) error {
+	var data [8]byte
+	binary.LittleEndian.PutUint64(data[:], uint64(value))
+	return writeAll(w, data[:])
+}
+
+func writeStr(w io.Writer, s string) error {
 	b := []byte(s)
-	binary.Write(w, binary.LittleEndian, uint32(len(b)))
-	w.Write(b)
+	if uint64(len(b)) > uint64(^uint32(0)) {
+		return errors.New("ffpatch: string exceeds format limit")
+	}
+	if err := writeU32(w, uint32(len(b))); err != nil {
+		return err
+	}
+	return writeAll(w, b)
 }

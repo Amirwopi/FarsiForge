@@ -126,13 +126,20 @@ namespace FarsiForgePatcher
             info.BlobSize = r.ReadInt64();
 
             info.TotalSize = 0;
+            if (info.BlobSize < 0)
+                throw new Exception("invalid negative patch blob size");
             for (uint i = 0; i < targetCount; i++)
             {
                 Target t = new Target();
                 t.Path = ReadString(r);
+                if (!IsSafeRelativePath(t.Path))
+                    throw new Exception("unsafe target path: " + t.Path);
                 t.Mode = r.ReadByte();
+                if (t.Mode > 1) throw new Exception("unsupported target mode " + t.Mode);
                 t.FinalSize = r.ReadInt64();
+                if (t.FinalSize < 0) throw new Exception("invalid target size: " + t.Path);
                 t.Sha256 = r.ReadBytes(32);
+                if (t.Sha256.Length != 32) throw new EndOfStreamException("truncated target hash");
                 uint recCount = r.ReadUInt32();
                 for (uint j = 0; j < recCount; j++)
                 {
@@ -142,22 +149,36 @@ namespace FarsiForgePatcher
                     if (rec.Src == 0)
                     {
                         rec.BasePath = ReadString(r);
+                        if (!IsSafeRelativePath(rec.BasePath))
+                            throw new Exception("unsafe base path: " + rec.BasePath);
                         rec.Offset = r.ReadInt64();
                         rec.Size = r.ReadInt64();
+                        if (rec.Offset < 0 || rec.Size < 0)
+                            throw new Exception("invalid base range: " + rec.BasePath);
                     }
-                    else
+                    else if (rec.Src == 1)
                     {
                         rec.PayloadOfs = r.ReadInt64();
                         rec.ZSize = r.ReadInt64();
                         rec.RawSize = r.ReadInt64();
+                        if (rec.PayloadOfs < 0 || rec.ZSize < 0 || rec.RawSize < 0 ||
+                            rec.ZSize > Int32.MaxValue || rec.RawSize > Int32.MaxValue ||
+                            rec.PayloadOfs > info.BlobSize || rec.ZSize > info.BlobSize - rec.PayloadOfs)
+                            throw new Exception("invalid payload range: " + rec.Path);
                     }
+                    else throw new Exception("unsupported record source " + rec.Src);
                     rec.Md5 = r.ReadBytes(16);
+                    if (rec.Md5.Length != 16) throw new EndOfStreamException("truncated record hash");
                     t.Records.Add(rec);
                 }
                 info.Targets.Add(t);
+                if (info.TotalSize > Int64.MaxValue - t.FinalSize)
+                    throw new Exception("patch target sizes overflow");
                 info.TotalSize += t.FinalSize;
             }
             info.BlobPos = r.BaseStream.Position;
+            if (info.BlobSize != r.BaseStream.Length - info.BlobPos)
+                throw new Exception("patch blob size does not match file length");
             return info;
         }
 
@@ -177,12 +198,15 @@ namespace FarsiForgePatcher
             {
                 foreach (Target t in info.Targets)
                 {
+                    if (!IsSafeRelativePath(t.Path))
+                        throw new Exception("unsafe target path: " + t.Path);
                     string absTarget = LongPath(Path.Combine(gameDir, t.Path));
                     string ffnew = absTarget + ".ffnew";
                     string ffbak = absTarget + ".ffbak";
 
                     EnsureParentDir(ffnew);
                     if (File.Exists(ffnew)) File.Delete(ffnew);
+                    temps.Add(ffnew);
 
                     if (log != null) log("در حال اعمال فایل‌ها: " + t.Path);
                     ApplyTarget(info, t, patchPath, gameDir, ffnew, ref bytesDone, bytesTotal, progress, log);
@@ -300,6 +324,8 @@ namespace FarsiForgePatcher
         {
             foreach (Target t in info.Targets)
             {
+                if (!IsSafeRelativePath(t.Path))
+                    throw new Exception("unsafe target path: " + t.Path);
                 string abs = LongPath(Path.Combine(gameDir, t.Path));
                 string ffbak = abs + ".ffbak";
                 if (File.Exists(ffbak))
@@ -320,7 +346,24 @@ namespace FarsiForgePatcher
         private static string ReadString(BinaryReader r)
         {
             uint n = r.ReadUInt32();
-            return Encoding.UTF8.GetString(r.ReadBytes((int)n));
+            if (n > Int32.MaxValue || n > r.BaseStream.Length - r.BaseStream.Position)
+                throw new EndOfStreamException("invalid or truncated string");
+            byte[] data = r.ReadBytes((int)n);
+            if (data.Length != (int)n) throw new EndOfStreamException("truncated string");
+            return Encoding.UTF8.GetString(data);
+        }
+
+        private static bool IsSafeRelativePath(string value)
+        {
+            if (String.IsNullOrWhiteSpace(value) || value.IndexOf('\0') >= 0 || Path.IsPathRooted(value))
+                return false;
+            string normalized = value.Replace('\\', '/');
+            if (normalized.StartsWith("/", StringComparison.Ordinal)) return false;
+            string[] parts = normalized.Split('/');
+            if (parts[0].Contains(":")) return false;
+            foreach (string part in parts)
+                if (part == "..") return false;
+            return true;
         }
 
         public static string Hex(byte[] b)

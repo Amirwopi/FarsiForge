@@ -3,6 +3,7 @@ package exchange
 import (
 	"encoding/csv"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,70 +15,97 @@ import (
 
 // ExportXLSX exports project entries to an Excel file for translation.
 // Columns: ID | Source | Translation | Status | Context | File | Path | Notes
-func ExportXLSX(proj *core.Project, outputPath string) error {
+func ExportXLSX(proj *core.Project, outputPath string) (retErr error) {
 	f := excelize.NewFile()
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); retErr == nil && err != nil {
+			retErr = fmt.Errorf("close xlsx: %w", err)
+		}
+	}()
 
 	sheet := "Translations"
-	f.SetSheetName(f.GetSheetName(0), sheet)
+	if err := f.SetSheetName(f.GetSheetName(0), sheet); err != nil {
+		return fmt.Errorf("rename xlsx sheet: %w", err)
+	}
 
 	// Set headers
 	headers := []string{"ID", "Source (متن اصلی)", "Translation (ترجمه)", "Status", "Context", "File", "Path", "Notes"}
 	for i, h := range headers {
-		cell, _ := excelize.CoordinatesToCellName(i+1, 1)
-		f.SetCellValue(sheet, cell, h)
+		cell, err := excelize.CoordinatesToCellName(i+1, 1)
+		if err != nil {
+			return fmt.Errorf("header cell: %w", err)
+		}
+		if err := f.SetCellValue(sheet, cell, h); err != nil {
+			return fmt.Errorf("write header cell %s: %w", cell, err)
+		}
 	}
 
 	// Style header row
-	style, _ := f.NewStyle(&excelize.Style{
-		Font: &excelize.Font{Bold: true, Size: 12},
-		Fill: excelize.Fill{Type: "pattern", Color: []string{"#4472C4"}, Pattern: 1},
+	style, err := f.NewStyle(&excelize.Style{
+		Font:      &excelize.Font{Bold: true, Size: 12},
+		Fill:      excelize.Fill{Type: "pattern", Color: []string{"#4472C4"}, Pattern: 1},
 		Alignment: &excelize.Alignment{Horizontal: "center", Vertical: "center"},
 	})
-	f.SetCellStyle(sheet, "A1", "H1", style)
+	if err != nil {
+		return fmt.Errorf("create header style: %w", err)
+	}
+	if err := f.SetCellStyle(sheet, "A1", "H1", style); err != nil {
+		return fmt.Errorf("style header row: %w", err)
+	}
 
 	// Set column widths
-	f.SetColWidth(sheet, "A", "A", 10)   // ID
-	f.SetColWidth(sheet, "B", "B", 40)   // Source
-	f.SetColWidth(sheet, "C", "C", 40)   // Translation
-	f.SetColWidth(sheet, "D", "D", 15)   // Status
-	f.SetColWidth(sheet, "E", "E", 15)   // Context
-	f.SetColWidth(sheet, "F", "F", 30)   // File
-	f.SetColWidth(sheet, "G", "G", 30)   // Path
-	f.SetColWidth(sheet, "H", "H", 20)   // Notes
+	for _, width := range []struct {
+		column string
+		value  float64
+	}{{"A", 10}, {"B", 40}, {"C", 40}, {"D", 15}, {"E", 15}, {"F", 30}, {"G", 30}, {"H", 20}} {
+		if err := f.SetColWidth(sheet, width.column, width.column, width.value); err != nil {
+			return fmt.Errorf("set column %s width: %w", width.column, err)
+		}
+	}
 
 	// RTL alignment for Source and Translation columns
-	rtlStyle, _ := f.NewStyle(&excelize.Style{
+	rtlStyle, err := f.NewStyle(&excelize.Style{
 		Alignment: &excelize.Alignment{Horizontal: "right", Vertical: "center", ReadingOrder: 2},
 	})
+	if err != nil {
+		return fmt.Errorf("create RTL style: %w", err)
+	}
 
 	// Data rows
 	for i, entry := range proj.Entries {
 		row := i + 2
-		f.SetCellValue(sheet, cell(1, row), entry.ID)
-		f.SetCellValue(sheet, cell(2, row), entry.Source)
-		f.SetCellValue(sheet, cell(3, row), entry.Translation)
-		f.SetCellValue(sheet, cell(4, row), string(entry.Status))
-		f.SetCellValue(sheet, cell(5, row), entry.Context)
-		f.SetCellValue(sheet, cell(6, row), entry.File)
-		f.SetCellValue(sheet, cell(7, row), entry.Path)
-		f.SetCellValue(sheet, cell(8, row), entry.Notes)
+		values := []interface{}{entry.ID, entry.Source, entry.Translation, string(entry.Status), entry.Context, entry.File, entry.Path, entry.Notes}
+		for col, value := range values {
+			cellName, err := excelize.CoordinatesToCellName(col+1, row)
+			if err != nil {
+				return fmt.Errorf("entry %d cell: %w", i, err)
+			}
+			if err := f.SetCellValue(sheet, cellName, value); err != nil {
+				return fmt.Errorf("write entry %d cell %s: %w", i, cellName, err)
+			}
+		}
 
 		// Apply RTL style to source and translation columns
-		f.SetCellStyle(sheet, cell(2, row), cell(3, row), rtlStyle)
+		if err := f.SetCellStyle(sheet, cell(2, row), cell(3, row), rtlStyle); err != nil {
+			return fmt.Errorf("style entry %d: %w", i, err)
+		}
 	}
 
 	// Freeze header row
-	f.SetPanes(sheet, &excelize.Panes{
+	if err := f.SetPanes(sheet, &excelize.Panes{
 		Freeze:      true,
 		XSplit:      0,
 		YSplit:      1,
 		TopLeftCell: "A2",
 		ActivePane:  "bottomLeft",
-	})
+	}); err != nil {
+		return fmt.Errorf("freeze xlsx header: %w", err)
+	}
 
 	// Enable autofilter
-	f.AutoFilter(sheet, "A1:H1", []excelize.AutoFilterOptions{})
+	if err := f.AutoFilter(sheet, "A1:H1", []excelize.AutoFilterOptions{}); err != nil {
+		return fmt.Errorf("set xlsx filter: %w", err)
+	}
 
 	return f.SaveAs(outputPath)
 }
@@ -121,34 +149,42 @@ func ImportXLSX(proj *core.Project, inputPath string) (int, error) {
 			}
 		}
 
-		if err := proj.SetTranslation(id, translation, status); err == nil {
-			count++
+		if err := proj.SetTranslation(id, translation, status); err != nil {
+			return count, fmt.Errorf("apply XLSX row for %q: %w", id, err)
 		}
+		count++
 	}
 
 	return count, nil
 }
 
 // ExportCSV exports project entries to a CSV file.
-func ExportCSV(proj *core.Project, outputPath string) error {
+func ExportCSV(proj *core.Project, outputPath string) (retErr error) {
 	file, err := os.Create(outputPath)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); retErr == nil && err != nil {
+			retErr = fmt.Errorf("close CSV: %w", err)
+		}
+	}()
 
 	// Write BOM for Excel UTF-8 detection
-	file.Write([]byte{0xEF, 0xBB, 0xBF})
+	if _, err := file.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
+		return fmt.Errorf("write CSV BOM: %w", err)
+	}
 
 	w := csv.NewWriter(file)
-	defer w.Flush()
 
 	// Header
-	w.Write([]string{"ID", "Source", "Translation", "Status", "Context", "File", "Path", "Notes"})
+	if err := w.Write([]string{"ID", "Source", "Translation", "Status", "Context", "File", "Path", "Notes"}); err != nil {
+		return fmt.Errorf("write CSV header: %w", err)
+	}
 
 	// Data
 	for _, entry := range proj.Entries {
-		w.Write([]string{
+		if err := w.Write([]string{
 			entry.ID,
 			entry.Source,
 			entry.Translation,
@@ -157,10 +193,16 @@ func ExportCSV(proj *core.Project, outputPath string) error {
 			entry.File,
 			entry.Path,
 			entry.Notes,
-		})
+		}); err != nil {
+			return fmt.Errorf("write CSV entry %s: %w", entry.ID, err)
+		}
 	}
 
-	return w.Error()
+	w.Flush()
+	if err := w.Error(); err != nil {
+		return fmt.Errorf("flush CSV: %w", err)
+	}
+	return nil
 }
 
 // ImportCSV imports translations from a CSV file.
@@ -173,9 +215,14 @@ func ImportCSV(proj *core.Project, inputPath string) (int, error) {
 
 	// Skip BOM if present
 	bom := make([]byte, 3)
-	n, _ := file.Read(bom)
+	n, err := io.ReadFull(file, bom)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return 0, fmt.Errorf("read CSV BOM: %w", err)
+	}
 	if n < 3 || bom[0] != 0xEF || bom[1] != 0xBB || bom[2] != 0xBF {
-		file.Seek(0, 0)
+		if _, err := file.Seek(0, io.SeekStart); err != nil {
+			return 0, fmt.Errorf("rewind CSV: %w", err)
+		}
 	}
 
 	r := csv.NewReader(file)
@@ -202,9 +249,10 @@ func ImportCSV(proj *core.Project, inputPath string) (int, error) {
 		if len(row) > 3 && row[3] != "" {
 			status = core.Status(row[3])
 		}
-		if err := proj.SetTranslation(id, translation, status); err == nil {
-			count++
+		if err := proj.SetTranslation(id, translation, status); err != nil {
+			return count, fmt.Errorf("apply CSV row for %q: %w", id, err)
 		}
+		count++
 	}
 
 	return count, nil

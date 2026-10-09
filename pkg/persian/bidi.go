@@ -1,10 +1,6 @@
 package persian
 
-import (
-	"unicode/utf8"
-
-	"golang.org/x/text/unicode/bidi"
-)
+import "golang.org/x/text/unicode/bidi"
 
 // BidiReorder converts a logical-order string into visual-order
 // suitable for engines that don't implement the Unicode BiDi algorithm.
@@ -93,8 +89,4 @@ func reverseRunes(r []rune) {
 	for i := 0; i < n/2; i++ {
 		r[i], r[n-1-i] = r[n-1-i], r[i]
 	}
-}
-
-func runeLen(s string) int {
-	return utf8.RuneCountInString(s)
 }

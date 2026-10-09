@@ -65,13 +65,13 @@ type Fields map[string]interface{}
 
 // Logger is a structured logger for FarsiForge.
 type Logger struct {
-	mu       sync.Mutex
-	level    Level
-	module   string
-	writers  []io.Writer
-	fields   Fields
-	entries  []Entry // In-memory log buffer for UI
-	maxBuf   int
+	mu      sync.Mutex
+	level   Level
+	module  string
+	writers []io.Writer
+	fields  Fields
+	entries []Entry // In-memory log buffer for UI
+	maxBuf  int
 }
 
 // Entry represents a single log entry.
@@ -204,7 +204,8 @@ func (l *Logger) log(level Level, msg string, args ...interface{}) {
 	line += "\n"
 
 	for _, w := range l.writers {
-		w.Write([]byte(line))
+		// Logging is best-effort and must not break the operation being logged.
+		_, _ = w.Write([]byte(line))
 	}
 
 	if level == LevelFatal {

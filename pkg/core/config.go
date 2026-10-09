@@ -18,10 +18,6 @@ type Config struct {
 	// Game search paths
 	GameSearchPaths []string `json:"game_search_paths"`
 
-	// Server
-	ListenAddr string `json:"listen_addr"`
-	ListenPort int    `json:"listen_port"`
-
 	// Defaults
 	DefaultPersianOpts PersianOptions `json:"default_persian_opts"`
 	DefaultAuthor      string         `json:"default_author"`
@@ -53,8 +49,6 @@ const (
 	EnvOutputDir      = "FARISIFORGE_OUTPUT_DIR"
 	EnvTempDir        = "FARISIFORGE_TEMP_DIR"
 	EnvPythonExe      = "FARISIFORGE_PYTHON"
-	EnvListenAddr     = "FARISIFORGE_LISTEN_ADDR"
-	EnvListenPort     = "FARISIFORGE_LISTEN_PORT"
 	EnvLogLevel       = "FARISIFORGE_LOG_LEVEL"
 	EnvMaxFileSizeMB  = "FARISIFORGE_MAX_FILE_SIZE_MB"
 	EnvMaxScanDepth   = "FARISIFORGE_MAX_SCAN_DEPTH"
@@ -103,8 +97,6 @@ func DefaultConfig() Config {
 		OutputDir:          envOr(EnvOutputDir, filepath.Join(root, "output")),
 		TempDir:            envOr(EnvTempDir, filepath.Join(os.TempDir(), "farsiforge")),
 		GameSearchPaths:    gamePaths,
-		ListenAddr:         envOr(EnvListenAddr, "127.0.0.1"),
-		ListenPort:         envIntOr(EnvListenPort, 7842),
 		DefaultPersianOpts: DefaultPersianOptions(),
 		DefaultAuthor:      "FarsiForge",
 		DefaultLanguage:    "fa-IR",
@@ -121,27 +113,51 @@ func DefaultConfig() Config {
 // hardcoding a single absolute path.
 func defaultGameSearchPaths(homeDir string) []string {
 	var paths []string
-
-	// Steam common locations (only add those that exist on this machine).
-	steamCandidates := []string{
-		`D:\SteamLibrary\steamapps\common`,
-		`C:\Program Files (x86)\Steam\steamapps\common`,
-		`E:\SteamLibrary\steamapps\common`,
-		`F:\SteamLibrary\steamapps\common`,
-		filepath.Join(homeDir, ".steam", "steam", "steamapps", "common"),
-	}
-	for _, p := range steamCandidates {
-		if dirExists(p) {
-			paths = append(paths, p)
+	seen := make(map[string]struct{})
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			return
+		}
+		key := filepath.Clean(abs)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		if dirExists(key) {
+			paths = append(paths, key)
 		}
 	}
 
-	// Generic games directory.
-	if dirExists(`D:\games`) {
-		paths = append(paths, `D:\games`)
+	steamRoots := []string{
+		os.Getenv("STEAM_PATH"),
+		filepath.Join(homeDir, ".steam", "steam"),
+		filepath.Join(homeDir, ".local", "share", "Steam"),
 	}
-	paths = append(paths, filepath.Join(homeDir, "Games"))
+	if windows := os.Getenv("ProgramFiles(x86)"); windows != "" {
+		steamRoots = append(steamRoots, filepath.Join(windows, "Steam"))
+	}
+	if windows := os.Getenv("ProgramFiles"); windows != "" {
+		steamRoots = append(steamRoots, filepath.Join(windows, "Steam"))
+	}
 
+	for _, library := range filepath.SplitList(os.Getenv("STEAM_LIBRARY_PATHS")) {
+		add(filepath.Join(library, "steamapps", "common"))
+	}
+	for _, root := range steamRoots {
+		add(filepath.Join(root, "steamapps", "common"))
+	}
+	if homeDir != "" {
+		gamesDir, err := filepath.Abs(filepath.Join(homeDir, "Games"))
+		if err == nil {
+			if _, exists := seen[filepath.Clean(gamesDir)]; !exists {
+				paths = append(paths, filepath.Clean(gamesDir))
+			}
+		}
+	}
 	return paths
 }
 
@@ -234,39 +250,42 @@ func findProjectRoot() string {
 		}
 	}
 
-	// 2. Walk up from CWD looking for go.mod with "farsiforge"
+	// 2. Search from the working directory and executable location. This also
+	// supports packaged builds started outside the project working directory.
 	if cwd, err := os.Getwd(); err == nil {
-		dir := cwd
-		for i := 0; i < 10; i++ {
-			modPath := filepath.Join(dir, "go.mod")
-			if data, err := os.ReadFile(modPath); err == nil {
-				if strings.Contains(string(data), "farsiforge") {
+		if root := findProjectRootFrom(cwd); root != "" {
+			return root
+		}
+	}
+	if exe, err := os.Executable(); err == nil {
+		if root := findProjectRootFrom(filepath.Dir(exe)); root != "" {
+			return root
+		}
+	}
+	return ""
+}
+
+func findProjectRootFrom(start string) string {
+	dir, err := filepath.Abs(start)
+	if err != nil {
+		return ""
+	}
+	for {
+		data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+		if err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				fields := strings.Fields(line)
+				if len(fields) == 2 && fields[0] == "module" && fields[1] == "farsiforge" {
 					return dir
 				}
 			}
-			parent := filepath.Dir(dir)
-			if parent == dir {
-				break
-			}
-			dir = parent
 		}
-	}
-
-	// 3. Known locations (last resort)
-	candidates := []string{
-		`D:\FarsiForge`,
-		`.`,
-	}
-	for _, c := range candidates {
-		abs, _ := filepath.Abs(c)
-		if _, err := os.Stat(filepath.Join(abs, "go.mod")); err == nil {
-			data, _ := os.ReadFile(filepath.Join(abs, "go.mod"))
-			if strings.Contains(string(data), "farsiforge") {
-				return abs
-			}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
 		}
+		dir = parent
 	}
-	return `D:\FarsiForge`
 }
 
 // findToolsDir locates the Tools directory.

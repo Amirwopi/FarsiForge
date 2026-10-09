@@ -37,10 +37,6 @@ func TestCrossValidation(t *testing.T) {
 	if cli == "" {
 		t.Skip("FarsiForgePatcherCli.exe not built; run patcher/build.ps1 first")
 	}
-	if _, err := exec.LookPath(cli); err != nil {
-		// cli is an absolute path to an exe; check it exists (already done).
-	}
-
 	tmp := t.TempDir()
 	gameDir := filepath.Join(tmp, "game")
 	patchFile := filepath.Join(tmp, "test.ffpatch")
@@ -233,5 +229,38 @@ func TestCrossValidationCopyFromBase(t *testing.T) {
 	}
 	if !bytes.Equal(got, rebuilt) {
 		t.Errorf("rebuilt.bin content wrong: got %d bytes want %d bytes", len(got), len(rebuilt))
+	}
+}
+
+func TestPatcherRejectsUnsafeTargetPath(t *testing.T) {
+	cli := cliExe()
+	if cli == "" {
+		t.Skip("FarsiForgePatcherCli.exe not built; run patcher/build.ps1 first")
+	}
+
+	patchPath := filepath.Join(t.TempDir(), "unsafe.ffpatch")
+	f, err := os.Create(patchPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := NewWriter(f)
+	if err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	_, err = w.AddTarget("../outside.txt", ModeReplace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := exec.Command(cli, "--info", patchPath).CombinedOutput()
+	if err == nil {
+		t.Fatalf("patcher accepted an unsafe target path: %s", out)
 	}
 }

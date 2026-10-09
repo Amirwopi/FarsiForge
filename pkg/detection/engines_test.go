@@ -31,7 +31,9 @@ func writePCKFixture(t *testing.T, dir, name, magic string, packVersion uint32) 
 	}
 	// Pad to 16 bytes so the file isn't suspiciously tiny
 	pad := make([]byte, 8)
-	f.Write(pad)
+	if _, err := f.Write(pad); err != nil {
+		t.Fatalf("write padding: %v", err)
+	}
 	return path
 }
 

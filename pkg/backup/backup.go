@@ -5,10 +5,13 @@
 package backup
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"farsiforge/pkg/core"
@@ -43,6 +46,11 @@ func (b *BackupManager) EnsureBackupDir() error {
 // BackupFile creates a backup of a file relative to the game root.
 // Returns the path to the backup file and its SHA256 hash.
 func (b *BackupManager) BackupFile(relPath string) (string, string, error) {
+	cleanPath, err := safeRelativePath(relPath)
+	if err != nil {
+		return "", "", core.WrapFile("backup", relPath, err, "invalid game-relative path")
+	}
+	relPath = cleanPath
 	if err := b.EnsureBackupDir(); err != nil {
 		return "", "", err
 	}
@@ -86,6 +94,11 @@ func (b *BackupManager) BackupFile(relPath string) (string, string, error) {
 // RestoreFile restores a file from backup to the game root.
 // Verifies the backup hash before restoring if expectedHash is provided.
 func (b *BackupManager) RestoreFile(relPath, expectedHash string) error {
+	cleanPath, err := safeRelativePath(relPath)
+	if err != nil {
+		return core.WrapFile("restore", relPath, err, "invalid game-relative path")
+	}
+	relPath = cleanPath
 	srcPath := filepath.Join(b.backupDir, relPath)
 	dstPath := filepath.Join(b.gameRoot, relPath)
 
@@ -112,21 +125,36 @@ func (b *BackupManager) RestoreFile(relPath, expectedHash string) error {
 	var tmpPath string
 	if fileExists(dstPath) {
 		tmpPath = dstPath + fmt.Sprintf(".tmp_%d", time.Now().UnixNano())
-		os.Rename(dstPath, tmpPath)
+		if err := os.Rename(dstPath, tmpPath); err != nil {
+			return core.WrapFile("restore", relPath, err, "failed to preserve existing game file")
+		}
 	}
 
 	// Copy backup back to game
 	if err := copyFile(srcPath, dstPath); err != nil {
 		// Restore failed, try to recover tmp file
 		if tmpPath != "" {
-			os.Rename(tmpPath, dstPath)
+			removeErr := os.Remove(dstPath)
+			if os.IsNotExist(removeErr) {
+				removeErr = nil
+			}
+			restoreErr := os.Rename(tmpPath, dstPath)
+			if removeErr != nil || restoreErr != nil {
+				return errors.Join(
+					core.WrapFile("restore", relPath, err, "failed to copy backup to game"),
+					removeErr,
+					restoreErr,
+				)
+			}
 		}
 		return core.WrapFile("restore", relPath, err, "failed to copy backup to game")
 	}
 
 	// Clean up tmp file
 	if tmpPath != "" {
-		os.Remove(tmpPath)
+		if err := os.Remove(tmpPath); err != nil {
+			return core.WrapFile("restore", relPath, err, "failed to remove temporary original file")
+		}
 	}
 
 	b.log.Info("Restored file", "file", relPath)
@@ -142,11 +170,24 @@ func (b *BackupManager) RollbackAll(manifest *core.PatchManifest) error {
 			b.log.Error("Failed to restore", "file", file.RelativePath, "error", err)
 		}
 	}
-	
+
 	if len(errs) > 0 {
-		return core.NewError("rollback", fmt.Sprintf("rollback completed with %d errors", len(errs)))
+		return fmt.Errorf("rollback completed with %d errors: %w", len(errs), errors.Join(errs...))
 	}
 	return nil
+}
+
+func safeRelativePath(name string) (string, error) {
+	name = strings.ReplaceAll(name, "\\", "/")
+	if name == "" || strings.ContainsRune(name, 0) || path.IsAbs(name) {
+		return "", fmt.Errorf("path must be relative")
+	}
+	clean := path.Clean(name)
+	first := strings.SplitN(clean, "/", 2)[0]
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.Contains(first, ":") {
+		return "", fmt.Errorf("path must remain within the game directory")
+	}
+	return filepath.FromSlash(clean), nil
 }
 
 // Helper functions
@@ -156,24 +197,32 @@ func fileExists(path string) bool {
 	return err == nil && !info.IsDir()
 }
 
-func copyFile(src, dst string) error {
+func copyFile(src, dst string) (retErr error) {
 	srcFile, err := os.Open(src)
 	if err != nil {
 		return err
 	}
-	defer srcFile.Close()
+	defer func() {
+		if err := srcFile.Close(); retErr == nil && err != nil {
+			retErr = err
+		}
+	}()
 
 	dstFile, err := os.Create(dst)
 	if err != nil {
 		return err
 	}
-	defer dstFile.Close()
+	defer func() {
+		if err := dstFile.Close(); retErr == nil && err != nil {
+			retErr = err
+		}
+	}()
 
 	_, err = io.Copy(dstFile, srcFile)
 	if err != nil {
 		return err
 	}
-	
+
 	// Force flush to disk
 	return dstFile.Sync()
 }

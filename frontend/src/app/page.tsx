@@ -5,7 +5,6 @@ import { motion, AnimatePresence } from "framer-motion";
 import { 
   FolderSearch, 
   Settings2, 
-  Terminal, 
   Box, 
   Rocket, 
   CheckCircle2, 
@@ -17,23 +16,22 @@ import {
   Code2
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Separator } from "@/components/ui/separator";
 import { SelectDirectory, DetectEngine, Extract, GetProject, SaveTranslations, Inject, BuildPatcher } from "../../wailsjs/go/main/App";
+import { core } from "../../wailsjs/go/models";
 
 type Step = "detect" | "extract" | "translate" | "inject" | "patch" | "success";
 
 export default function FarsiForgeDashboard() {
   const [currentStep, setCurrentStep] = useState<Step>("detect");
-  const [dirPath, setDirPath] = useState("D:\\Games\\Supermarket Together");
+  const [dirPath, setDirPath] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [gameInfo, setGameInfo] = useState<any>(null);
-  const [translations, setTranslations] = useState<any[]>([]);
+  const [gameInfo, setGameInfo] = useState<core.GameInfo | null>(null);
+  const [translations, setTranslations] = useState<core.StringEntry[]>([]);
   const [patchCredits, setPatchCredits] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
@@ -83,6 +81,13 @@ export default function FarsiForgeDashboard() {
 
 
   const handleNextStep = async (next: Step) => {
+    const selectedGame = gameInfo;
+    if (next === "extract" && !dirPath.trim()) {
+      return;
+    }
+    if (next !== "extract" && !selectedGame) {
+      return;
+    }
     setIsProcessing(true);
     setProgress(50);
     try {
@@ -90,15 +95,15 @@ export default function FarsiForgeDashboard() {
         const info = await DetectEngine(dirPath);
         setGameInfo(info);
       } else if (next === "translate") {
-        await Extract(gameInfo);
-        const proj = await GetProject(gameInfo.game_root);
+        await Extract(selectedGame!);
+        const proj = await GetProject(selectedGame!.game_root);
         setTranslations(proj.entries || []);
       } else if (next === "inject") {
-        await SaveTranslations(gameInfo.game_root, translations);
+        await SaveTranslations(selectedGame!.game_root, translations);
       } else if (next === "patch") {
-        await Inject(gameInfo);
+        await Inject(selectedGame!);
       } else if (next === "success") {
-        await BuildPatcher(gameInfo.game_root, patchCredits);
+        await BuildPatcher(selectedGame!.game_root, patchCredits);
       }
       setProgress(100);
       setCurrentStep(next);
@@ -220,6 +225,7 @@ export default function FarsiForgeDashboard() {
                           <Input 
                             value={dirPath}
                             onChange={(e) => setDirPath(e.target.value)}
+                            placeholder="مسیر پوشهٔ بازی را انتخاب کنید"
                             className="pl-4 pr-10 py-6 bg-zinc-900/50 border-zinc-800 text-left font-mono text-lg focus-visible:ring-indigo-500"
                             dir="ltr"
                           />
@@ -233,7 +239,7 @@ export default function FarsiForgeDashboard() {
                           <p className="text-xs text-zinc-500 text-center animate-pulse">در حال تحلیل ساختار فایل‌ها...</p>
                         </div>
                       ) : (
-                        <Button onClick={() => handleNextStep("extract")} size="lg" className="w-full text-lg h-14 bg-indigo-600 hover:bg-indigo-700 shadow-[0_0_20px_rgba(79,70,229,0.3)] transition-all">
+                        <Button onClick={() => handleNextStep("extract")} disabled={!dirPath.trim()} size="lg" className="w-full text-lg h-14 bg-indigo-600 hover:bg-indigo-700 shadow-[0_0_20px_rgba(79,70,229,0.3)] transition-all">
                           شناسایی موتور
                         </Button>
                       )}

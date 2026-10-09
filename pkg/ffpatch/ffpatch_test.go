@@ -12,6 +12,20 @@ import (
 	"testing"
 )
 
+type noProgressWriter struct{}
+
+func (noProgressWriter) Write([]byte) (int, error) { return 0, nil }
+
+func TestWriterReportsShortWrite(t *testing.T) {
+	w, err := NewWriter(noProgressWriter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err == nil {
+		t.Fatal("Close accepted a writer that made no progress")
+	}
+}
+
 // ---- minimal Go reader for verification (mirror of the C# reader) ----
 
 type gRecord struct {
@@ -51,9 +65,13 @@ type gPatch struct {
 
 func readStr(r io.Reader) string {
 	var n uint32
-	binary.Read(r, binary.LittleEndian, &n)
+	if err := binary.Read(r, binary.LittleEndian, &n); err != nil {
+		panic(err)
+	}
 	b := make([]byte, n)
-	io.ReadFull(r, b)
+	if _, err := io.ReadFull(r, b); err != nil {
+		panic(err)
+	}
 	return string(b)
 }
 
@@ -67,7 +85,9 @@ func readPatch(data []byte) (*gPatch, error) {
 		return nil, io.EOF
 	}
 	p := &gPatch{}
-	binary.Read(r, binary.LittleEndian, &p.version)
+	if err := binary.Read(r, binary.LittleEndian, &p.version); err != nil {
+		return nil, err
+	}
 	if p.version != 1 {
 		return nil, io.EOF
 	}
@@ -81,33 +101,55 @@ func readPatch(data []byte) (*gPatch, error) {
 	p.createdAt = readStr(r)
 
 	var tcount uint32
-	binary.Read(r, binary.LittleEndian, &tcount)
-	binary.Read(r, binary.LittleEndian, &p.blobSize)
+	if err := binary.Read(r, binary.LittleEndian, &tcount); err != nil {
+		return nil, err
+	}
+	if err := binary.Read(r, binary.LittleEndian, &p.blobSize); err != nil {
+		return nil, err
+	}
 
 	for i := uint32(0); i < tcount; i++ {
 		t := &gTarget{}
 		t.path = readStr(r)
 		t.mode = readByte(r)
-		binary.Read(r, binary.LittleEndian, &t.finalSize)
+		if err := binary.Read(r, binary.LittleEndian, &t.finalSize); err != nil {
+			return nil, err
+		}
 		t.sha256 = make([]byte, 32)
-		io.ReadFull(r, t.sha256)
+		if _, err := io.ReadFull(r, t.sha256); err != nil {
+			return nil, err
+		}
 		var rcount uint32
-		binary.Read(r, binary.LittleEndian, &rcount)
+		if err := binary.Read(r, binary.LittleEndian, &rcount); err != nil {
+			return nil, err
+		}
 		for j := uint32(0); j < rcount; j++ {
 			rec := &gRecord{}
 			rec.path = readStr(r)
 			rec.src = readByte(r)
 			if rec.src == 0 {
 				rec.basePath = readStr(r)
-				binary.Read(r, binary.LittleEndian, &rec.offset)
-				binary.Read(r, binary.LittleEndian, &rec.size)
+				if err := binary.Read(r, binary.LittleEndian, &rec.offset); err != nil {
+					return nil, err
+				}
+				if err := binary.Read(r, binary.LittleEndian, &rec.size); err != nil {
+					return nil, err
+				}
 			} else {
-				binary.Read(r, binary.LittleEndian, &rec.payloadOfs)
-				binary.Read(r, binary.LittleEndian, &rec.zSize)
-				binary.Read(r, binary.LittleEndian, &rec.rawSize)
+				if err := binary.Read(r, binary.LittleEndian, &rec.payloadOfs); err != nil {
+					return nil, err
+				}
+				if err := binary.Read(r, binary.LittleEndian, &rec.zSize); err != nil {
+					return nil, err
+				}
+				if err := binary.Read(r, binary.LittleEndian, &rec.rawSize); err != nil {
+					return nil, err
+				}
 			}
 			rec.md5 = make([]byte, 16)
-			io.ReadFull(r, rec.md5)
+			if _, err := io.ReadFull(r, rec.md5); err != nil {
+				return nil, err
+			}
 			t.records = append(t.records, rec)
 		}
 		p.targets = append(p.targets, t)
@@ -118,7 +160,9 @@ func readPatch(data []byte) (*gPatch, error) {
 
 func readByte(r io.Reader) uint8 {
 	var b [1]byte
-	io.ReadFull(r, b[:])
+	if _, err := io.ReadFull(r, b[:]); err != nil {
+		panic(err)
+	}
 	return b[0]
 }
 

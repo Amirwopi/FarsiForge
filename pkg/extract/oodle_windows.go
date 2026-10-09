@@ -17,7 +17,7 @@ func decompressOodle(src []byte, outSize int, dllPath string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load oo2core DLL: %w", err)
 	}
-	defer dll.Release()
+	defer func() { _ = dll.Release() }()
 	proc, err := dll.FindProc("OodleLZ_Decompress")
 	if err != nil {
 		return nil, fmt.Errorf("find OodleLZ_Decompress: %w", err)

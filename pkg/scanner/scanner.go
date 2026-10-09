@@ -81,7 +81,7 @@ func FindDataDir(dir string) string {
 // WalkDir walks up to maxDepth levels and returns all file paths matching a predicate.
 func WalkDir(root string, maxDepth int, pred func(string) bool) []string {
 	var results []string
-	filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -98,6 +98,9 @@ func WalkDir(root string, maxDepth int, pred func(string) bool) []string {
 		}
 		return nil
 	})
+	if err != nil {
+		return nil
+	}
 	return results
 }
 

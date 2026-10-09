@@ -332,96 +332,12 @@ type GodotInjector struct{}
 func (i *GodotInjector) SupportedEngine() string { return "godot" }
 func (i *GodotInjector) Capabilities() core.InjectorCaps {
 	return core.InjectorCaps{
-		TextInjection:     true,
-		NeedsExternalTool: true,
-		ToolName:          "fftools",
+		TextInjection: false,
 	}
 }
 
-func (i *GodotInjector) Inject(ctx context.Context, info *core.GameInfo, proj *core.Project, reg core.ToolRegistry, opts core.PersianOptions) (*core.InjectionResult, error) {
-	res := &core.InjectionResult{}
-	fftools := fftoolsPath(reg)
-	if fftools == "" {
-		return res, core.NewError("inject", "fftools.exe not found (required for Godot translation import)")
-	}
-
-	workDir, err := proj.EnsureWorkingDir()
-	if err != nil {
-		return res, err
-	}
-
-	translatedEntries := proj.FindTranslated()
-	if len(translatedEntries) == 0 {
-		return res, nil
-	}
-
-	// Process Persian text.
-	processed := make(map[string]string)
-	for _, e := range translatedEntries {
-		tr := e.Translation
-		if opts.Reshape || opts.BidiReorder || opts.FixYeh || opts.PersianDigits {
-			tr = persian.Process(tr, persian.Options{
-				Reshape:        opts.Reshape,
-				BidiReorder:    opts.BidiReorder,
-				FixYeh:         opts.FixYeh,
-				PersianDigits:  opts.PersianDigits,
-				ConvertPunct:   opts.ConvertPunct,
-				DropDiacritics: opts.DropDiacritics,
-			})
-		}
-		processed[e.Source] = tr
-	}
-	res.StringCount = len(processed)
-
-	// Backup target files.
-	backupMgr := backup.New(info.GameRoot, filepath.Join(filepath.Dir(workDir), "backup"))
-	for _, file := range proj.ExtractedFiles {
-		if _, _, err := backupMgr.BackupFile(file); err == nil {
-			res.ModifiedFiles = append(res.ModifiedFiles, file)
-		}
-	}
-
-	// Group translated entries by source file (one CSV per .translation).
-	byFile := make(map[string][]core.StringEntry)
-	for _, e := range translatedEntries {
-		byFile[e.File] = append(byFile[e.File], e)
-	}
-
-	translationToolAvailable := true
-	for file, entries := range byFile {
-		var rows [][]string
-		rows = append(rows, []string{"key", "translation"})
-		for _, e := range entries {
-			rows = append(rows, []string{e.Path, processed[e.Source]})
-		}
-		outCsv := filepath.Join(workDir, filepath.Base(file)+".translations.csv")
-		if err := writeCSV(outCsv, rows); err != nil {
-			res.Errors = append(res.Errors, "failed to write CSV for "+file+": "+err.Error())
-			continue
-		}
-
-		// The patched .translation is written next to the original.
-		translationPath := file
-		if !filepath.IsAbs(translationPath) {
-			translationPath = filepath.Join(info.GameRoot, file)
-		}
-		outTranslation := filepath.Join(workDir, filepath.Base(file))
-
-		out, err := tools.RunSilent(ctx, workDir, fftools, "translation", "import", outCsv, outTranslation)
-		if err != nil {
-			// The translation command may not be deployed yet — degrade
-			// gracefully. Report once and skip remaining files.
-			if translationToolAvailable {
-				res.Errors = append(res.Errors,
-					"fftools translation import is not available yet — Godot .translation injection skipped")
-				translationToolAvailable = false
-			}
-			log.Warn("fftools translation import not available yet", "file", file, "output", firstLines(out, 3))
-			continue
-		}
-	}
-
-	return res, nil
+func (*GodotInjector) Inject(context.Context, *core.GameInfo, *core.Project, core.ToolRegistry, core.PersianOptions) (*core.InjectionResult, error) {
+	return nil, core.NewError("inject", "Godot translation injection is not implemented; project files were not modified")
 }
 
 // ── Generic ─────────────────────────────────────────────────────────

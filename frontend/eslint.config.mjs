@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Generated Wails bindings are regenerated from Go types.
+    "wailsjs/**",
   ]),
 ]);
 
