@@ -254,6 +254,18 @@ func (a *App) GetProject(gameRoot string) (*core.Project, error) {
 	return core.LoadProject(projPath)
 }
 
+// SearchEntries loads the project saved under gameRoot and returns the
+// entries matching the query (case-insensitive substring across ID, Source,
+// Translation, File, and Notes) and the optional status filter (a status
+// value or "qa" for entries with QA notes; "" disables filtering).
+func (a *App) SearchEntries(gameRoot, query, status string) ([]core.StringEntry, error) {
+	proj, err := a.GetProject(gameRoot)
+	if err != nil {
+		return nil, err
+	}
+	return proj.SearchEntries(query, status), nil
+}
+
 // SaveTranslations saves translations
 func (a *App) SaveTranslations(gameRoot string, entries []core.StringEntry) error {
 	projPath := filepath.Join(gameRoot, ".farsiforge_project.json")

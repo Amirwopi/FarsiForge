@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { 
   FolderSearch, 
@@ -35,6 +35,8 @@ export default function FarsiForgeDashboard() {
   const [gameInfo, setGameInfo] = useState<any>(null);
   const [translations, setTranslations] = useState<any[]>([]);
   const [patchCredits, setPatchCredits] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
 
   const engineInfo = {
     engine: gameInfo ? gameInfo.engine : "---",
@@ -42,6 +44,35 @@ export default function FarsiForgeDashboard() {
     confidence: gameInfo ? (gameInfo.confidence * 100).toFixed(0) + "%" : "---",
     files: "---"
   };
+
+  // Filtered entry list for the translate step: case-insensitive search
+  // across id/source/translation/file/notes plus a status filter ("qa"
+  // matches entries carrying QA notes). Original indices are preserved so
+  // edits map back onto the full translations array.
+  const filteredEntries = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return translations
+      .map((item, idx) => ({ item, idx }))
+      .filter(({ item }) => {
+        if (statusFilter === "qa") {
+          if (!(item.notes || "").trim()) return false;
+        } else if (statusFilter !== "all" && item.status !== statusFilter) {
+          return false;
+        }
+        if (q) {
+          const hay = [item.id, item.source, item.translation, item.file, item.notes]
+            .filter(Boolean)
+            .join("\n")
+            .toLowerCase();
+          if (!hay.includes(q)) return false;
+        }
+        return true;
+      });
+  }, [translations, searchQuery, statusFilter]);
+
+  // Cap the rendered list so huge projects (100k+ entries) stay responsive.
+  const MAX_VISIBLE = 200;
+  const visibleEntries = filteredEntries.slice(0, MAX_VISIBLE);
 
   const handleSelectDir = async () => {
     try {
@@ -254,20 +285,50 @@ export default function FarsiForgeDashboard() {
                       <h2 className="text-xl font-bold text-white">مدیریت ترجمه‌ها</h2>
                     </div>
 
+                    <div className="flex gap-2 items-center">
+                      <Input
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        className="bg-zinc-900 border-zinc-700 text-sm text-zinc-200"
+                        placeholder="جستجو در متن‌ها (متن، ترجمه، فایل، شناسه، یادداشت)..."
+                      />
+                      <select
+                        value={statusFilter}
+                        onChange={(e) => setStatusFilter(e.target.value)}
+                        className="bg-zinc-900 border border-zinc-700 rounded-md px-3 py-2 text-sm text-zinc-200 shrink-0"
+                      >
+                        <option value="all">همه</option>
+                        <option value="untranslated">بی‌ترجمه</option>
+                        <option value="translated">ترجمه‌شده</option>
+                        <option value="approved">تأییدشده</option>
+                        <option value="skipped">ردشده</option>
+                        <option value="qa">هشدار QA</option>
+                      </select>
+                    </div>
+                    <p className="text-xs text-zinc-500">
+                      نمایش {visibleEntries.length} از {filteredEntries.length} مورد
+                      {filteredEntries.length !== translations.length && ` (کل: ${translations.length})`}
+                      {filteredEntries.length > MAX_VISIBLE && " — برای دیدن موارد بیشتر، جستجو را دقیق‌تر کنید"}
+                    </p>
+
                     <div className="flex-1 bg-zinc-900/50 rounded-xl border border-zinc-800 p-4 space-y-3 overflow-y-auto max-h-[300px]">
-                      {translations.length === 0 && <p className="text-center text-zinc-500 py-10">متنی یافت نشد.</p>}
-                      {translations.map((item, i) => (
-                        <div key={i} className="grid grid-cols-2 gap-4 p-3 rounded-lg bg-zinc-950/50 border border-zinc-800/50">
-                          <div className="text-left font-mono text-sm text-zinc-400" dir="ltr">{item.source}</div>
-                          <Input 
-                            value={item.translation || ""} 
+                      {visibleEntries.length === 0 && <p className="text-center text-zinc-500 py-10">متنی یافت نشد.</p>}
+                      {visibleEntries.map(({ item, idx }) => (
+                        <div key={item.id || idx} className="grid grid-cols-2 gap-4 p-3 rounded-lg bg-zinc-950/50 border border-zinc-800/50">
+                          <div className="space-y-1">
+                            <div className="text-left font-mono text-sm text-zinc-400" dir="ltr">{item.source}</div>
+                            {item.notes && (
+                              <div className="text-xs text-amber-400 truncate" dir="ltr" title={item.notes}>⚠ {item.notes}</div>
+                            )}
+                          </div>
+                          <Input
+                            value={item.translation || ""}
                             onChange={(e) => {
-                              const newT = [...translations];
-                              newT[i].Translation = e.target.value;
-                              setTranslations(newT);
+                              const v = e.target.value;
+                              setTranslations((prev) => prev.map((t, i) => (i === idx ? { ...t, translation: v } : t)));
                             }}
-                            className="bg-zinc-900 border-zinc-700 text-right text-sm text-zinc-200" 
-                            placeholder="ترجمه..." 
+                            className="bg-zinc-900 border-zinc-700 text-right text-sm text-zinc-200"
+                            placeholder="ترجمه..."
                           />
                         </div>
                       ))}

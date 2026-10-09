@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"farsiforge/pkg/textfilter"
@@ -161,6 +162,36 @@ func (p *Project) GroupByContext() map[string][]StringEntry {
 		groups[ctx] = append(groups[ctx], e)
 	}
 	return groups
+}
+
+// SearchEntries returns the entries matching the given query and status
+// filter. The query is a case-insensitive substring matched against ID,
+// Source, Translation, File, and Notes; an empty query matches everything.
+// The status filter accepts a status value ("untranslated", "translated",
+// "approved", "skipped") or the pseudo-status "qa" for entries carrying
+// QA notes; an empty status disables status filtering.
+func (p *Project) SearchEntries(query, status string) []StringEntry {
+	q := strings.ToLower(strings.TrimSpace(query))
+	var out []StringEntry
+	for _, e := range p.Entries {
+		if status != "" {
+			if status == "qa" {
+				if e.Notes == "" {
+					continue
+				}
+			} else if e.Status != Status(status) {
+				continue
+			}
+		}
+		if q != "" {
+			haystack := strings.ToLower(e.ID + "\n" + e.Source + "\n" + e.Translation + "\n" + e.File + "\n" + e.Notes)
+			if !strings.Contains(haystack, q) {
+				continue
+			}
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 // EnsureWorkingDir returns the working directory, creating it if needed.
