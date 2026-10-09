@@ -71,11 +71,14 @@ type record struct {
 
 // Target is a patch target builder.
 type Target struct {
-	path      string
-	mode      Mode
-	finalSize int64
-	sha256    []byte // 32 bytes; if nil, computed at Close from records
-	records   []*record
+	path        string
+	mode        Mode
+	finalSize   int64
+	sha256      []byte // 32 bytes; if nil, computed at Close from records
+	baseSize    int64
+	baseSHA256  []byte
+	hasBaseHash bool
+	records     []*record
 }
 
 // Writer is an FFP1 patch writer. Use NewWriter to create one.
@@ -157,6 +160,22 @@ func (t *Target) SetFinalHash(sha []byte, finalSize int64) {
 	t.finalSize = finalSize
 }
 
+// SetBaseHash records the expected installed game file for FFP1 version 2.
+// The patcher checks it before making any changes, preventing application to
+// an incompatible game build.
+func (t *Target) SetBaseHash(sha []byte, baseSize int64) error {
+	if len(sha) != sha256.Size {
+		return fmt.Errorf("ffpatch: base sha256 must be %d bytes", sha256.Size)
+	}
+	if baseSize < 0 {
+		return fmt.Errorf("ffpatch: base size must not be negative")
+	}
+	t.baseSHA256 = append([]byte(nil), sha...)
+	t.baseSize = baseSize
+	t.hasBaseHash = true
+	return nil
+}
+
 // Close finalizes the patch: deflates payloads into the blob, resolves
 // payload offsets, computes target hashes/sizes where missing, and writes
 // the complete FFP1 stream (header + targets + blob) to the underlying writer.
@@ -222,7 +241,14 @@ func (w *Writer) Close() error {
 	// 2. write header.
 	var hdr bytes.Buffer
 	hdr.WriteString("FFP1")
-	if err := writeU32(&hdr, 1); err != nil {
+	version := uint32(1)
+	for _, target := range w.targets {
+		if target.hasBaseHash {
+			version = 2
+			break
+		}
+	}
+	if err := writeU32(&hdr, version); err != nil {
 		return fmt.Errorf("ffpatch: write version: %w", err)
 	}
 
@@ -249,6 +275,15 @@ func (w *Writer) Close() error {
 			return fmt.Errorf("ffpatch: write target size: %w", err)
 		}
 		hdr.Write(t.sha256)
+		if version >= 2 {
+			if !t.hasBaseHash || len(t.baseSHA256) != sha256.Size {
+				return fmt.Errorf("ffpatch: target %q is missing its base hash for version 2", t.path)
+			}
+			if err := writeI64(&hdr, t.baseSize); err != nil {
+				return fmt.Errorf("ffpatch: write target base size: %w", err)
+			}
+			hdr.Write(t.baseSHA256)
+		}
 		if err := writeU32(&hdr, uint32(len(t.records))); err != nil {
 			return fmt.Errorf("ffpatch: write record count: %w", err)
 		}

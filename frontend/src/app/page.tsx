@@ -32,6 +32,7 @@ export default function FarsiForgeDashboard() {
   const [progress, setProgress] = useState(0);
   const [gameInfo, setGameInfo] = useState<core.GameInfo | null>(null);
   const [translations, setTranslations] = useState<core.StringEntry[]>([]);
+  const [patchResult, setPatchResult] = useState<Awaited<ReturnType<typeof BuildPatcher>> | null>(null);
   const [patchCredits, setPatchCredits] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
@@ -103,7 +104,8 @@ export default function FarsiForgeDashboard() {
       } else if (next === "patch") {
         await Inject(selectedGame!);
       } else if (next === "success") {
-        await BuildPatcher(selectedGame!.game_root, patchCredits);
+        const result = await BuildPatcher(selectedGame!.game_root, patchCredits);
+        setPatchResult(result);
       }
       setProgress(100);
       setCurrentStep(next);
@@ -321,7 +323,23 @@ export default function FarsiForgeDashboard() {
                       {visibleEntries.length === 0 && <p className="text-center text-zinc-500 py-10">متنی یافت نشد.</p>}
                       {visibleEntries.map(({ item, idx }) => (
                         <div key={item.id || idx} className="grid grid-cols-2 gap-4 p-3 rounded-lg bg-zinc-950/50 border border-zinc-800/50">
-                          <div className="space-y-1">
+                          <div className="space-y-1 min-w-0">
+                            <div className="flex items-center justify-between gap-2 text-xs text-zinc-500">
+                              <span className="truncate text-indigo-300" title={item.context || "متن عمومی"}>{item.context || "متن عمومی"}</span>
+                              <span className="truncate font-mono text-left" dir="ltr" title={`${item.file}${item.path ? ` · ${item.path}` : ""}`}>
+                                {item.file}{item.path ? ` · ${item.path}` : ""}
+                              </span>
+                            </div>
+                            {item.context === "MonoBehaviour" && item.path?.startsWith("raw_") && (
+                              <p className="text-xs text-amber-400" title="فیلد منبع از روی فایل باینری قابل‌تأیید نیست؛ تزریق این متن پشتیبانی نمی‌شود.">
+                                اسکن خام؛ محل فیلد تأییدنشده و فعلاً غیرقابل‌تزریق
+                              </p>
+                            )}
+                            {item.context === "MonoBehaviour raw serialized string (typetree unavailable)" && (
+                              <p className="text-xs text-sky-400" title="رشته و offset باینری تأیید شده‌اند؛ نام فیلد بازیابی نشده است.">
+                                رشتهٔ سریال‌شده با offset دقیق؛ نام فیلد در دسترس نیست
+                              </p>
+                            )}
                             <div className="text-left font-mono text-sm text-zinc-400" dir="ltr">{item.source}</div>
                             {item.notes && (
                               <div className="text-xs text-amber-400 truncate" dir="ltr" title={item.notes}>⚠ {item.notes}</div>
@@ -361,14 +379,14 @@ export default function FarsiForgeDashboard() {
                     </div>
                     <div className="space-y-2">
                       <h2 className="text-2xl font-bold text-white">تزریق و اعمال تغییرات</h2>
-                      <p className="text-zinc-400 max-w-md mx-auto">در این مرحله تمام متون فارسی شده، راست‌چین شده و فونت‌ها به درون فایل‌های اصلی بازی بازگردانده می‌شوند.</p>
+                      <p className="text-zinc-400 max-w-md mx-auto">ترجمه‌ها روی کپی‌های موقت فایل‌های قابل پشتیبانی اعمال می‌شوند؛ فایل اصلی بازی در این مرحله تغییر نمی‌کند.</p>
                     </div>
                     
                     <div className="w-full max-w-md flex flex-col gap-4">
                       {isProcessing ? (
                         <div className="space-y-2 w-full">
                           <Progress value={progress} className="h-2 bg-zinc-800" />
-                          <p className="text-xs text-zinc-500 text-center animate-pulse">در حال تزریق (RTL Shaping) ...</p>
+                          <p className="text-xs text-zinc-500 text-center animate-pulse">در حال آماده‌سازی فایل‌های پچ ...</p>
                         </div>
                       ) : (
                         <Button onClick={() => handleNextStep("patch")} size="lg" className="w-full text-lg h-14 bg-emerald-600 hover:bg-emerald-700 shadow-[0_0_20px_rgba(16,185,129,0.3)] transition-all">
@@ -427,16 +445,19 @@ export default function FarsiForgeDashboard() {
                       <Rocket className="w-12 h-12 text-green-400" />
                     </div>
                     <div className="space-y-2">
-                      <h2 className="text-3xl font-black text-white">عملیات با موفقیت انجام شد!</h2>
-                      <p className="text-zinc-400 max-w-md mx-auto text-lg">فارسی‌ساز با موفقیت بر روی بازی اعمال شد. اکنون می‌توانید بازی را اجرا کنید.</p>
+                      <h2 className="text-3xl font-black text-white">بستهٔ فارسی‌ساز آماده شد</h2>
+                      <p className="text-zinc-400 max-w-md mx-auto text-lg">بسته ساخته شده است؛ برای اعمال آن، فایل نصب‌کننده را اجرا کنید و پوشهٔ بازی را انتخاب کنید.</p>
+                      {patchResult && (
+                        <div className="max-w-md mx-auto rounded-lg border border-zinc-800 bg-zinc-900/70 p-3 text-sm text-zinc-300">
+                          <div>{patchResult.target_count} فایل در پچ قرار گرفت.</div>
+                          <div className="mt-1 break-all font-mono text-xs text-zinc-500" dir="ltr">{patchResult.output_dir}</div>
+                        </div>
+                      )}
                     </div>
                     
                     <div className="flex gap-4 mt-4">
                       <Button onClick={() => setCurrentStep("detect")} variant="outline" className="border-zinc-700 hover:bg-zinc-800">
                         شروع پروژه‌ی جدید
-                      </Button>
-                      <Button className="bg-green-600 hover:bg-green-700 px-8">
-                        اجرای بازی
                       </Button>
                     </div>
                   </motion.div>

@@ -93,6 +93,67 @@ graph_data = {
 	}
 }
 
+func TestExtractGodotTextEntriesSkipsDictionaryKeysAndKeepsLine(t *testing.T) {
+	data := []byte(`
+"description": "Read the note at the desk.",
+"Action": "New Game",
+`)
+	got := extractGodotTextEntries(data)
+	if len(got) != 2 {
+		t.Fatalf("got %d entries, want two values only: %+v", len(got), got)
+	}
+	if got[0].Text != "Read the note at the desk." || got[0].Line != 2 {
+		t.Errorf("first entry = %+v, want note text on line 2", got[0])
+	}
+	if got[1].Text != "New Game" || got[1].Line != 3 {
+		t.Errorf("second entry = %+v, want UI text on line 3", got[1])
+	}
+}
+
+func TestIsGodotEditorAddon(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{path: `addons\sprouty_dialogs\editor\settings.tscn`, want: true},
+		{path: `addons/sprouty_dialogs/runtime/dialog.gd`, want: false},
+		{path: `content/editor/dialog.tres`, want: false},
+		{path: `addons/other/plugin.gd`, want: false},
+	} {
+		if got := isGodotEditorAddon(tc.path); got != tc.want {
+			t.Errorf("isGodotEditorAddon(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestScanGodotStringTokensHandlesCommentsQuotesAndMultiline(t *testing.T) {
+	source := "# \"commented out\"\nvar single = 'A journal note'\n" +
+		"var triple = \"\"\"A longer\nmultiline note\"\"\"\n" +
+		`var raw = r"\n stays literal"` + "\n"
+	tokens := scanGodotStringTokens(source)
+	if len(tokens) != 3 {
+		t.Fatalf("scanned %d string tokens, want 3: %+v", len(tokens), tokens)
+	}
+	if tokens[0].Text != "A journal note" || tokens[0].Line != 2 {
+		t.Errorf("single-quoted token = %+v", tokens[0])
+	}
+	if tokens[1].Text != "A longer\nmultiline note" || tokens[1].Line != 3 {
+		t.Errorf("triple-quoted token = %+v", tokens[1])
+	}
+	if tokens[2].Text != `\n stays literal` || tokens[2].Line != 5 {
+		t.Errorf("raw token = %+v", tokens[2])
+	}
+}
+
+func TestGodotUnescapeUnicodeAndLineContinuation(t *testing.T) {
+	got := godotUnescape(`\u0645\u0631\u062d\u0628\u0627 \U01F642 \uD83D\uDE42 line\
+continued`)
+	want := "مرحبا 🙂 🙂 linecontinued"
+	if got != want {
+		t.Fatalf("godotUnescape() = %q, want %q", got, want)
+	}
+}
+
 func TestGodotUnescape(t *testing.T) {
 	in := `He said \"hello\" to me.\nNew line.`
 	got := godotUnescape(in)

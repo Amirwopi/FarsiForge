@@ -1,59 +1,46 @@
 # Project Progress
 
 Updated: 2026-10-09
-Overall: Active development; support differs by engine and operation.
 
-## Product Objective
-Build a dependable Persian localization tool that can detect game technologies, extract text, support translation QA and Persian shaping, inject where formats allow, and produce safe reversible patches. Keep engine-specific behavior behind the detection/extraction/injection registries. Do not describe an engine as supported for a capability until verified on representative game data.
+## Objective
 
-## Architecture
-- pkg/detection: detector registry and engine identification.
-- pkg/extract: engine extractors and format readers.
-- pkg/core: project model, configuration, shared interfaces.
-- pkg/textfilter, pkg/validate: translation QA and validation.
-- pkg/persian: shaping, bidi, digit and punctuation handling.
-- pkg/inject: write-back strategies.
-- pkg/ffpatch, pkg/installer, patcher/: FFP1 creation, package staging, apply/rollback/uninstall.
-- pkg/tools: portable dependency discovery and process execution.
-- frontend/, app.go: Wails desktop UI and bindings.
-- D:\FarsiForgeTools: independent fftools module for .locres, Godot .pck, and generic text operations.
+Build an evidence-driven Persian game-localization workbench: recover player-facing text with stable context, write supported formats correctly, and deliver reversible patches. Track detection, extraction, injection, archive rebuild, and installation as separate capabilities.
 
-## Verified Capabilities
-- Detection registry covers Unity, Unreal, UE3, Godot, SAGE, GoldSrc, Source 2, FromSoftware, Factorio, Project Zomboid, RAGE, and generic fallback.
-- Extraction is verified for Unity, Unreal localization assets, Godot resources, Valve localization, Factorio, Project Zomboid, and SAGE families; see the engine matrix and CLI validation records for per-game counts.
-- Local ELDEN RING Data0 validation extracted 520,750 entries from 24 message bundles through BHD5/BDT, AES, DCX/Oodle, BND4, and FMG.
-- Godot .translation CLI export/import is not implemented; recovered text resources are supported. The RAGE GXT2 parser exists, but RPF7 traversal is not implemented. GTA V NG-encrypted archives are not extracted.
-- FFP1 has Go writer/C# reader cross-validation coverage. The patcher supports apply, rollback, and uninstall.
-- Translation search and QA notes are wired through project methods, Wails/CLI, and the translation UI.
+## Implemented foundations
 
-## Active Quality Work
-- Eliminate developer-machine absolute paths and version/date-specific executable names. Use executable-relative discovery, OS environment variables, and user configuration.
-- Keep archive and translation file paths confined to caller-selected roots.
-- Propagate write, close, staging, and packaging errors; do not report success for partial outputs.
-- Keep UI state typed and generated bindings excluded from linting.
-- Clean obsolete scripts only after verifying they are not called or documented.
+- Project JSON and work outputs are stored outside game directories. Re-extraction preserves translations only when entry identity matches; legacy project files are copied and retained.
+- Translation saves now validate stable IDs and status values before mutation, rejecting duplicate project/submission IDs and stale IDs from an old UI view instead of silently dropping or ambiguously overwriting changes.
+- Translation carry-over keys are represented as a comparable tuple of container, file, key, context, and source fields; delimiters inside source data cannot create false identity matches.
+- Main Go application includes engine/format registries, staged injectors, Persian text processing and QA, FFP1 patch construction, and a C# installer with original-file checks, backup, rollback, and uninstall.
+- FFP1 v2 binds replacement targets to original size and SHA-256 while retaining v1 read compatibility. Recent patcher changes cover reparse-point escapes, concurrent file changes during apply/uninstall, stale temporary files, duplicate target aliases, and rollback behavior.
+- `D:\FarsiForgeTools` is a separate Go module. Its Godot tooling reads/writes supported Godot 4 `OptimizedTranslation` resources and rebuilds standalone unencrypted PCK v2/v3/v4. CSV catalogs are required to resolve translation hash IDs to exact source keys.
+- Main Godot extraction and injection retain PCK identity. Injection currently updates existing Persian `.translation` resources only when the matching CSV and PCK are available; the rebuilt full PCK is staged for patch creation.
+- Generic UTF-8 key/value injection now fails on absent or ambiguous translated keys instead of silently claiming a complete write.
+- Staged patch output is bound to SHA-256 hashes captured after successful injection. `BuildPatcher` passes the expected hash to the installer, which validates before creating output and rechecks while writing; a changed game file requires reinjection. Full Go tests, vet, build, and `git diff --check` passed after this hardening.
+- Project save replacement now has a Windows failure-path test: it holds the existing project file without delete sharing, verifies replacement fails, confirms the previous JSON bytes remain intact, and checks the temporary file is removed. The successful replacement test also passes.
 
-## Current Limitations
-- RAGE RPF7 NG key/table discovery and nested archive traversal are open.
-- FromSoftware support beyond the tested ELDEN RING Data0 variant is incomplete; BND3 and additional DCX variants are open.
-- Injection is implemented for Unity, Unreal, and generic text paths. Godot and other detected engines require format-specific write support; Godot currently returns an explicit unsupported error.
-- Some format support remains synthetic-test-only. In particular, .locres needs shipped-game validation and packed formats need representative sample tests.
-- Patch packaging should remain streaming and recoverable for very large assets; validate crash/partial-output behavior before claiming production-grade reliability.
+## Validation evidence
 
-## Verification Record
-- Final main-repository checks passed: go test ./..., go vet ./..., go build ./..., and golangci-lint run ./pkg/....
-- Earlier extractor implementation had real ELDEN RING validation and graph refresh.
-- Frontend ESLint, TypeScript, and production build passed. The C# patcher compiled and Go-to-C# patch cross-validation passed.
-- FarsiForgeTools test, vet, and build passed after archive/injection path validation. fftools is Go 1.21 with standard library only; main FarsiForge uses Go 1.26 and Wails.
+- Latest main-repository checks after the synthetic installer integration, translation-save validation, and structured re-extraction identity changes: `go test ./... -count=1`, `go vet ./...`, and `go build ./...` passed. The opt-in Godot integration test also passed with a Godot-generated disposable PCK, local `fftools`, and the C# patcher. `graphify update .` completed.
+- Synthetic Godot roundtrip covered exact CSV/hash identity, translation import, PCK rebuild, FFP1 build, C# apply, and uninstall. Apply installed the rebuilt PCK; uninstall restored original bytes. Godot 4.5.1 previously loaded the rebuilt pack and returned the changed Persian message. This is not a real-game validation.
+- A local Godot 4.3+ / PCK v3 sample yielded 8,123 strings across 390 recovered files (7,014 `.tscn`, 1,024 `.gd`, 85 `.tres`). Separately, a recovered project mapped 4,842 entries across 18 locale resources; 4,826 had non-empty existing translations. Counts do not establish semantic completeness.
+- Read-only MOLDRISE v1.0.5 validation: Godot PCK v4 / engine 4.7.0, 4,620 packed files. GDRE recovery plus the main pipeline extracted 3,789 strings from 467 `.gd/.tscn/.tres` files. It originally included 2,280 entries from add-ons, of which 1,812 were under editor directories; the extractor now excludes those editor files and quoted dictionary keys. The resulting project has 3,789 unique IDs, non-empty literal paths/context, and source line numbers; 413 runtime/add-on entries remain. Dialogue paragraphs and menu/accessibility copy were inspected and confirmed as authored strings. Item/note coverage is incomplete: inspected item paths yielded mostly state labels and a `newspaper` name, and image/texture text is outside this extractor.
+- Read-only Factorio extraction yielded 14,945 entries from 53 `.cfg` files with no missing/duplicate IDs. DDPER 8.4 generic fallback yielded 504 entries from 55 `.json`/`.txt` files; semantic coverage and write-back remain unverified.
+- Read-only Unity 2021.2.3 / Orc Massage extraction yielded 607 entries from 5 files (383 `.assets`, 224 extensionless levels), with unique non-empty IDs. No write-back or game-load check was done; use a bounded disposable fixture rather than copying the full installation.
+- Follow-up audit of that same read-only Unity project found all 607 entries use the `raw_*` fallback path. It includes genuine dialogue/UI text and controls, but also repeated placeholder strings, Unity asset-store documentation, and UI Toolkit style declarations. Raw entries lack verified typetree field identity and are not injectable with the current importer; Unity injection now fails before invoking tools when these entries are translated, and the UI marks them as non-injectable candidates. This is a conservative failure path, not Unity write-back support. Full Go tests, vet, build, frontend lint, TypeScript check, and diff check passed after the guard/UI change.
+- A scan of 14 `D:\games` folders reported SAGE, GoldSrc, custom, FromSoftware, Factorio, Unreal, Godot, Unity, and Project Zomboid labels. Detection results are not extraction or injection proof. Older ELDEN RING counts are historical and need revalidation.
 
-## Decisions
-- Generalize readers by engine family and version; GTA V and ELDEN RING are validation fixtures, not the product scope.
-- Injection is separate from extraction; do not imply extraction support guarantees safe write-back.
-- Third-party format references may guide independent implementations; do not copy GPL source into this project.
-- User-specific game/tool directories are local data and are not to be removed during code cleanup.
+## Limits and open work
 
-## Next
-1. Close out the current cross-project audit and record actual results.
-2. Add real-game fixtures for .locres, RPF7/GXT2, Godot .translation resources, and non-ER FromSoftware variants.
-3. Implement Godot .translation export/import and extend safe injection per engine; test patch install, rollback, and uninstall against disposable game copies.
-4. Update README engine capability claims from measured evidence.
+- No real shipped Godot game PCK has passed write-back and gameplay validation. Godot embedded/encrypted/sparse packs, scripts/scenes, and creation of a missing Persian locale remain unsupported.
+- MOLDRISE's PCK contains no `.translation`/CSV catalog, so the existing main injector cannot write back its recovered `.gd/.tscn/.tres` literals. A 4.7.0-compatible disposable runtime test is still required before claiming this game can be patched.
+- Unity and Unreal write-back require real versioned validation; Unreal `.locres` support does not establish `.pak` rebuilding.
+- RAGE encrypted RPF7 traversal is not implemented; loose GXT2 support is not GTA V archive support. Broader FromSoftware variants and safe injection are also open.
+- Player-facing semantic coverage (dialogue, UI, journals, notes, items, tutorials, quests), placeholders/markup, fonts/glyphs, and omissions need asset-family review.
+- Consult root `todo.md` for the detailed work queue, current constraints, and next steps. Do not infer compatibility beyond the evidence above.
+
+## Operating decisions
+
+- Treat real game installations as read-only; use disposable copies or temporary output directories.
+- Never use generic text mutation as fallback for an unknown engine/format.
+- Preserve unrelated working-tree files and separate-repository work. Do not push the main repository without a direct request.

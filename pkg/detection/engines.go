@@ -3,6 +3,7 @@ package detection
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -375,14 +376,17 @@ func (d *GodotDetector) Detect(gameDir string) (*core.DetectionResult, error) {
 		}
 
 		if res.Version == "" && len(pckFiles) > 0 {
-			// Header-byte verification: read only magic+version bytes (read-only).
-			magic, packVersion, err := readPCKHeader(pckFiles[0])
-			if err == nil && magic == "GDPC" {
-				res.Version = pckVersionToString(packVersion)
+			// Read the PCK and engine versions from the read-only header.
+			header, err := readPCKHeader(pckFiles[0])
+			if err == nil && header.Magic == "GDPC" {
+				res.Version = pckEngineVersionToString(header)
 				res.Evidence = append(res.Evidence,
-					fmt.Sprintf("PCK header verified: magic=%s pack_version=%d", magic, packVersion))
-				res.Metadata["pck_magic"] = magic
-				res.Metadata["pck_pack_version"] = fmt.Sprintf("%d", packVersion)
+					fmt.Sprintf("PCK header verified: magic=%s pack_version=%d engine_version=%s", header.Magic, header.PackVersion, res.Version))
+				res.Metadata["pck_magic"] = header.Magic
+				res.Metadata["pck_pack_version"] = fmt.Sprintf("%d", header.PackVersion)
+				if header.EngineMajor > 0 {
+					res.Metadata["pck_engine_version"] = fmt.Sprintf("%d.%d.%d", header.EngineMajor, header.EngineMinor, header.EnginePatch)
+				}
 			}
 		}
 
@@ -408,14 +412,11 @@ func (d *GodotDetector) Detect(gameDir string) (*core.DetectionResult, error) {
 //	v2 → Godot 3.x & 4.0–4.2
 //	v3 → Godot 4.3+
 func readPCKVersion(pckPath string) string {
-	magic, packVersion, err := readPCKHeader(pckPath)
-	if err != nil {
+	header, err := readPCKHeader(pckPath)
+	if err != nil || header.Magic != "GDPC" {
 		return ""
 	}
-	if magic != "GDPC" {
-		return ""
-	}
-	return pckVersionToString(packVersion)
+	return pckEngineVersionToString(header)
 }
 
 // pckVersionToString maps a PCK pack-version integer to a human-readable
@@ -433,23 +434,48 @@ func pckVersionToString(packVersion uint32) string {
 	}
 }
 
-// readPCKHeader opens the .pck file read-only, reads the first 8 bytes
-// (magic + version), and closes the file immediately. It never writes.
-func readPCKHeader(pckPath string) (magic string, packVersion uint32, err error) {
+type pckHeader struct {
+	Magic       string
+	PackVersion uint32
+	EngineMajor uint32
+	EngineMinor uint32
+	EnginePatch uint32
+}
+
+func pckEngineVersionToString(header pckHeader) string {
+	if header.EngineMajor > 0 {
+		return fmt.Sprintf("%d.%d.%d", header.EngineMajor, header.EngineMinor, header.EnginePatch)
+	}
+	return pckVersionToString(header.PackVersion)
+}
+
+// readPCKHeader reads the PCK format and engine version fields read-only.
+// PCK v1 only has magic and pack version; v2+ also stores engine major,
+// minor, and patch versions.
+func readPCKHeader(pckPath string) (pckHeader, error) {
 	f, err := os.Open(pckPath)
 	if err != nil {
-		return "", 0, err
+		return pckHeader{}, err
 	}
 	defer f.Close()
 
-	var hdr [8]byte
-	n, err := f.Read(hdr[:])
-	if err != nil || n < 8 {
-		return "", 0, fmt.Errorf("short read: %d bytes", n)
+	var hdr [20]byte
+	if _, err := io.ReadFull(f, hdr[:8]); err != nil {
+		return pckHeader{}, fmt.Errorf("read PCK magic and pack version: %w", err)
 	}
-	magic = string(hdr[:4])
-	packVersion = binary.LittleEndian.Uint32(hdr[4:8])
-	return magic, packVersion, nil
+	header := pckHeader{
+		Magic:       string(hdr[:4]),
+		PackVersion: binary.LittleEndian.Uint32(hdr[4:8]),
+	}
+	if header.PackVersion >= 2 {
+		if _, err := io.ReadFull(f, hdr[8:20]); err != nil {
+			return pckHeader{}, fmt.Errorf("read PCK engine version: %w", err)
+		}
+		header.EngineMajor = binary.LittleEndian.Uint32(hdr[8:12])
+		header.EngineMinor = binary.LittleEndian.Uint32(hdr[12:16])
+		header.EnginePatch = binary.LittleEndian.Uint32(hdr[16:20])
+	}
+	return header, nil
 }
 
 // ── Generic ─────────────────────────────────────────────────────────

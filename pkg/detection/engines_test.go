@@ -11,7 +11,7 @@ import (
 
 // writePCKFixture creates a minimal synthetic .pck file with the given
 // magic and pack version. Returns the file path.
-func writePCKFixture(t *testing.T, dir, name, magic string, packVersion uint32) string {
+func writePCKFixture(t *testing.T, dir, name, magic string, packVersion uint32, engineVersion ...uint32) string {
 	t.Helper()
 	path := filepath.Join(dir, name)
 	f, err := os.Create(path)
@@ -20,7 +20,7 @@ func writePCKFixture(t *testing.T, dir, name, magic string, packVersion uint32) 
 	}
 	defer f.Close()
 
-	// Write 4-byte magic + 4-byte version (LE) + padding
+	// Write the PCK format header and optional engine version fields.
 	if _, err := f.WriteString(magic); err != nil {
 		t.Fatalf("write magic: %v", err)
 	}
@@ -28,6 +28,16 @@ func writePCKFixture(t *testing.T, dir, name, magic string, packVersion uint32) 
 	binary.LittleEndian.PutUint32(verBytes[:], packVersion)
 	if _, err := f.Write(verBytes[:]); err != nil {
 		t.Fatalf("write version: %v", err)
+	}
+	if packVersion >= 2 {
+		var engine [3]uint32
+		copy(engine[:], engineVersion)
+		for _, versionPart := range engine {
+			binary.LittleEndian.PutUint32(verBytes[:], versionPart)
+			if _, err := f.Write(verBytes[:]); err != nil {
+				t.Fatalf("write engine version: %v", err)
+			}
+		}
 	}
 	// Pad to 16 bytes so the file isn't suspiciously tiny
 	pad := make([]byte, 8)
@@ -65,20 +75,20 @@ func TestReadPCKHeader(t *testing.T) {
 	// Create a valid v3 pck fixture
 	pckPath := writePCKFixture(t, dir, "game.pck", "GDPC", 3)
 
-	magic, version, err := readPCKHeader(pckPath)
+	header, err := readPCKHeader(pckPath)
 	if err != nil {
 		t.Fatalf("readPCKHeader failed: %v", err)
 	}
-	if magic != "GDPC" {
-		t.Errorf("magic = %q, want %q", magic, "GDPC")
+	if header.Magic != "GDPC" {
+		t.Errorf("magic = %q, want %q", header.Magic, "GDPC")
 	}
-	if version != 3 {
-		t.Errorf("version = %d, want 3", version)
+	if header.PackVersion != 3 {
+		t.Errorf("version = %d, want 3", header.PackVersion)
 	}
 }
 
 func TestReadPCKHeader_NonexistentFile(t *testing.T) {
-	_, _, err := readPCKHeader(filepath.Join(t.TempDir(), "nonexistent.pck"))
+	_, err := readPCKHeader(filepath.Join(t.TempDir(), "nonexistent.pck"))
 	if err == nil {
 		t.Error("expected error for nonexistent file, got nil")
 	}
@@ -88,12 +98,19 @@ func TestReadPCKHeader_BadMagic(t *testing.T) {
 	dir := t.TempDir()
 	pckPath := writePCKFixture(t, dir, "badmagic.pck", "XXXX", 3)
 
-	magic, _, err := readPCKHeader(pckPath)
+	header, err := readPCKHeader(pckPath)
 	if err != nil {
 		t.Fatalf("readPCKHeader failed: %v", err)
 	}
-	if magic == "GDPC" {
+	if header.Magic == "GDPC" {
 		t.Error("expected non-GDPC magic, got GDPC")
+	}
+}
+
+func TestReadPCKVersionReadsEngineVersion(t *testing.T) {
+	path := writePCKFixture(t, t.TempDir(), "godot-4.7.pck", "GDPC", 4, 4, 7, 0)
+	if got := readPCKVersion(path); got != "4.7.0" {
+		t.Fatalf("readPCKVersion() = %q, want 4.7.0", got)
 	}
 }
 

@@ -2,8 +2,10 @@ package extract
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/csv"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -195,9 +197,24 @@ func (e *UnityExtractor) Extract(ctx context.Context, info *core.GameInfo, proj 
 	if err := json.Unmarshal(data, &entries); err != nil {
 		return core.NewError("extract", "failed to parse extracted strings: "+err.Error())
 	}
+	dataRoot := info.DataPath
+	if dataRoot == "" {
+		dataRoot = findUnityDataRoot(info.GameRoot)
+	}
+	if dataRoot == "" {
+		return core.NewError("extract", "could not resolve the Unity data directory for game-relative asset paths")
+	}
+	relDataRoot, err := filepath.Rel(info.GameRoot, dataRoot)
+	if err != nil || filepath.IsAbs(relDataRoot) || strings.HasPrefix(relDataRoot, ".."+string(filepath.Separator)) || relDataRoot == ".." {
+		return core.NewError("extract", "Unity data directory is outside the selected game directory")
+	}
 
 	fileMap := make(map[string]bool)
 	for _, e := range entries {
+		if filepath.IsAbs(e.File) || strings.Contains(filepath.ToSlash(e.File), "../") || filepath.ToSlash(e.File) == ".." {
+			return core.NewError("extract", "Unity asset path escaped the data directory: "+e.File)
+		}
+		e.File = filepath.ToSlash(filepath.Join(relDataRoot, e.File))
 		proj.AddEntry(e)
 		if !fileMap[e.File] {
 			proj.ExtractedFiles = append(proj.ExtractedFiles, e.File)
@@ -206,6 +223,22 @@ func (e *UnityExtractor) Extract(ctx context.Context, info *core.GameInfo, proj 
 	}
 
 	return nil
+}
+
+func findUnityDataRoot(gameRoot string) string {
+	if strings.HasSuffix(strings.ToLower(filepath.Base(filepath.Clean(gameRoot))), "_data") {
+		return gameRoot
+	}
+	entries, err := os.ReadDir(gameRoot)
+	if err != nil {
+		return ""
+	}
+	for _, entry := range entries {
+		if entry.IsDir() && strings.HasSuffix(strings.ToLower(entry.Name()), "_data") {
+			return filepath.Join(gameRoot, entry.Name())
+		}
+	}
+	return ""
 }
 
 // ── Unreal Engine ───────────────────────────────────────────────────
@@ -492,7 +525,11 @@ func (e *GodotExtractor) Extract(ctx context.Context, info *core.GameInfo, proj 
 
 	// 3. Handle .translation files from the recovered project (same logic
 	//    as the pck-only path).
-	e.exportTranslationFiles(ctx, proj, reg, workDir, recDir)
+	pckRel, err := filepath.Rel(info.GameRoot, pckFiles[0])
+	if err != nil {
+		return fmt.Errorf("resolve Godot pack path: %w", err)
+	}
+	e.exportTranslationFiles(ctx, proj, reg, workDir, recDir, filepath.ToSlash(pckRel))
 
 	// 4. Parse recovered text files (.tres/.gd/.tscn) for hardcoded strings.
 	textFiles := scanner.WalkDir(recDir, 12, func(p string) bool {
@@ -503,23 +540,42 @@ func (e *GodotExtractor) Extract(ctx context.Context, info *core.GameInfo, proj 
 		return false
 	})
 
+	skippedEditorAddonFiles := 0
 	for _, tf := range textFiles {
+		relPath, err := filepath.Rel(recDir, tf)
+		if err != nil {
+			log.Warn("Could not make Godot text path relative", "file", tf, "error", err)
+			continue
+		}
+		if isGodotEditorAddon(relPath) {
+			skippedEditorAddonFiles++
+			continue
+		}
 		data, err := os.ReadFile(tf)
 		if err != nil {
 			continue
 		}
-		relPath, _ := filepath.Rel(recDir, tf)
-		texts := extractGodotTextStrings(data)
-		for _, s := range texts {
+		relPath = filepath.ToSlash(relPath)
+		texts := extractGodotTextEntries(data)
+		for _, entry := range texts {
+			identity := sha256.Sum256([]byte(filepath.ToSlash(pckRel) + "\x00" + relPath + "\x00" + entry.Text))
+			sourceHash := sha256.Sum256([]byte(entry.Text))
 			proj.AddEntry(core.StringEntry{
-				Source:  s,
-				File:    relPath,
-				Context: "Godot",
+				ID:        fmt.Sprintf("godot-text:%x", identity[:16]),
+				Source:    entry.Text,
+				File:      relPath,
+				Container: filepath.ToSlash(pckRel),
+				Path:      fmt.Sprintf("literal:%x", sourceHash[:8]),
+				Context:   "Godot text literal",
+				Line:      entry.Line,
 			})
 		}
 		if len(texts) > 0 {
 			proj.ExtractedFiles = append(proj.ExtractedFiles, relPath)
 		}
+	}
+	if skippedEditorAddonFiles > 0 {
+		log.Info("Skipped Godot editor add-on files", "files", skippedEditorAddonFiles)
 	}
 
 	return nil
@@ -543,15 +599,15 @@ func (e *GodotExtractor) extractPckOnly(ctx context.Context, info *core.GameInfo
 		}
 		proj.ExtractedFiles = append(proj.ExtractedFiles, pckRel)
 
-		e.exportTranslationFiles(ctx, proj, reg, workDir, extractDir)
+		e.exportTranslationFiles(ctx, proj, reg, workDir, extractDir, filepath.ToSlash(pckRel))
 	}
 
 	return nil
 }
 
-// exportTranslationFiles finds .translation files under dir, exports each to
-// CSV via fftools, and adds the entries to the project.
-func (e *GodotExtractor) exportTranslationFiles(ctx context.Context, proj *core.Project, reg core.ToolRegistry, workDir, dir string) {
+// exportTranslationFiles matches recovered .translation resources to their
+// companion Godot CSVs and adds exact hash-resolved messages to the project.
+func (e *GodotExtractor) exportTranslationFiles(ctx context.Context, proj *core.Project, reg core.ToolRegistry, workDir, dir, container string) {
 	fftools := fftoolsPath(reg)
 	if fftools == "" {
 		log.Warn("fftools.exe not found (cannot export .translation files)")
@@ -561,38 +617,152 @@ func (e *GodotExtractor) exportTranslationFiles(ctx context.Context, proj *core.
 	translationFiles := scanner.WalkDir(dir, 8, func(p string) bool {
 		return strings.ToLower(filepath.Ext(p)) == ".translation"
 	})
+	csvFiles := scanner.WalkDir(dir, 8, func(p string) bool {
+		return strings.EqualFold(filepath.Ext(p), ".csv")
+	})
+	if len(translationFiles) == 0 {
+		return
+	}
+	if len(csvFiles) == 0 {
+		log.Warn("Godot .translation resources found without source CSV catalogs", "count", len(translationFiles), "dir", dir)
+		return
+	}
+	outputDir := filepath.Join(workDir, "godot_translation_export")
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		log.Warn("Could not create Godot translation export directory", "error", err)
+		return
+	}
 
 	for _, tf := range translationFiles {
-		tfRel, _ := filepath.Rel(dir, tf)
-		outCsv := filepath.Join(workDir, filepath.Base(tf)+".csv")
-		out, err := tools.RunSilent(ctx, workDir, fftools, "translation", "export", tf, outCsv)
+		tfRel, err := filepath.Rel(dir, tf)
 		if err != nil {
-			// The translation command may not be deployed yet — degrade
-			// gracefully instead of crashing the whole extraction.
-			log.Warn("fftools translation export not available yet", "file", tf, "error", firstLines(out, 3))
+			log.Warn("Could not make Godot translation path relative", "file", tf, "error", err)
 			continue
 		}
-
-		// Parse CSV into entries. Godot .translation CSV columns are
-		// typically: key, source (tolerant of extra columns).
-		rows := readCSV(outCsv)
-		for i, row := range rows {
-			if i == 0 || len(row) < 2 {
+		tfRel = filepath.ToSlash(tfRel)
+		catalog := findGodotCatalog(tf, csvFiles)
+		if catalog == "" {
+			log.Warn("No unambiguous Godot CSV catalog matches translation resource", "file", tf)
+			continue
+		}
+		sourceLanguage, err := godotCSVSourceLanguage(catalog)
+		if err != nil {
+			log.Warn("Could not identify a source-language column for Godot catalog", "file", catalog, "error", err)
+			continue
+		}
+		if !strings.EqualFold(sourceLanguage, "EN") {
+			log.Warn("Godot catalog has no EN column; using its first language column as source text", "catalog", catalog, "source_language", sourceLanguage)
+		}
+		containerHash := sha256.Sum256([]byte(container))
+		namespace := fmt.Sprintf("%s-%x", sanitizePakName(container), containerHash[:6])
+		outJSON := filepath.Join(outputDir, namespace, sanitizePakName(tfRel)+".json")
+		out, err := tools.RunSilent(ctx, workDir, fftools, "translation", "export", tf, catalog, "--source-language", sourceLanguage, "-o", outJSON)
+		if err != nil {
+			log.Warn("fftools could not export Godot translation resource", "file", tf, "catalog", catalog, "error", firstLines(out, 3))
+			continue
+		}
+		data, err := os.ReadFile(outJSON)
+		if err != nil {
+			log.Warn("Could not read Godot translation export", "file", outJSON, "error", err)
+			continue
+		}
+		var messages []struct {
+			ID          string `json:"id"`
+			Key         string `json:"key"`
+			Source      string `json:"source"`
+			Translation string `json:"translation"`
+			Locale      string `json:"locale"`
+		}
+		if err := json.Unmarshal(data, &messages); err != nil {
+			log.Warn("Invalid Godot translation export JSON", "file", outJSON, "error", err)
+			continue
+		}
+		added := 0
+		for _, message := range messages {
+			if message.ID == "" || message.Key == "" || strings.TrimSpace(message.Source) == "" {
 				continue
 			}
-			key, source := row[0], row[1]
-			if source == "" {
-				continue
+			status := core.StatusUntranslated
+			if message.Translation != "" {
+				status = core.StatusTranslated
+			}
+			idPrefix := "godot:" + tfRel + "::"
+			if container != "" {
+				idPrefix = "godot:" + container + "::" + tfRel + "::"
 			}
 			proj.AddEntry(core.StringEntry{
-				Source:  source,
-				File:    tfRel,
-				Path:    key,
-				Context: "Godot",
+				ID:          idPrefix + message.ID,
+				Source:      message.Source,
+				Translation: message.Translation,
+				File:        tfRel,
+				Container:   container,
+				Path:        message.Key,
+				Context:     fmt.Sprintf("Godot translation %s (source %s)", message.Locale, sourceLanguage),
+				Status:      status,
 			})
+			added++
+		}
+		if added == 0 {
+			log.Warn("Godot translation resource had no mapped entries", "file", tf, "catalog", catalog)
+			continue
 		}
 		proj.ExtractedFiles = append(proj.ExtractedFiles, tfRel)
+		log.Info("Exported Godot translation entries", "file", tfRel, "locale", messages[0].Locale, "source_language", sourceLanguage, "entries", added)
 	}
+}
+
+func findGodotCatalog(translationPath string, csvFiles []string) string {
+	base := strings.TrimSuffix(filepath.Base(translationPath), filepath.Ext(translationPath))
+	stem := strings.TrimSuffix(base, filepath.Ext(base)) // remove locale suffix, e.g. .FA
+	translationDir := filepath.Clean(filepath.Dir(translationPath))
+	var exact, sameDir []string
+	for _, candidate := range csvFiles {
+		if !strings.EqualFold(filepath.Dir(candidate), translationDir) {
+			continue
+		}
+		sameDir = append(sameDir, candidate)
+		if strings.EqualFold(strings.TrimSuffix(filepath.Base(candidate), filepath.Ext(candidate)), stem) {
+			exact = append(exact, candidate)
+		}
+	}
+	if len(exact) == 1 {
+		return exact[0]
+	}
+	if len(exact) == 0 && len(sameDir) == 1 {
+		return sameDir[0]
+	}
+	return ""
+}
+
+func godotCSVSourceLanguage(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	r := csv.NewReader(f)
+	r.FieldsPerRecord = -1
+	header, err := r.Read()
+	if err != nil {
+		return "", err
+	}
+	var first string
+	for _, raw := range header {
+		name := strings.TrimPrefix(strings.TrimSpace(raw), "\ufeff")
+		if strings.EqualFold(name, "key") || name == "" {
+			continue
+		}
+		if strings.EqualFold(name, "EN") {
+			return name, nil
+		}
+		if first == "" {
+			first = name
+		}
+	}
+	if first == "" {
+		return "", fmt.Errorf("catalog has no language columns")
+	}
+	return first, nil
 }
 
 // gdrePath returns the gdre_tools.exe path from the registry, or "" if

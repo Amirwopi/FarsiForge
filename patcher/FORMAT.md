@@ -1,4 +1,4 @@
-# FFP1 — FarsiForge Patch Format v1
+# FFP1 — FarsiForge Patch Format
 
 FFP1 is the binary patch format used by the FarsiForge end-user patcher. It is a
 generalization of the Machine Party "MPP1" format: instead of a single Godot
@@ -17,7 +17,7 @@ rebuilt from a list of records (copy-from-base or embedded compressed payload).
 ```
 Header:
   magic "FFP1"                 4 ASCII bytes
-  u32  version = 1
+  u32  version = 1 or 2
   metadata: 8 strings, each (u32 len + UTF-8 bytes):
     patch_name
     game_name
@@ -36,6 +36,9 @@ Targets (repeated target_count times):
   u8   mode                      (0 = rebuild from records, 1 = replace = single payload record)
   i64  final_size               (uncompressed size of the final target file)
   32 bytes sha256               (of the final target file)
+  if version >= 2:
+    i64  base_size              (expected size of the original game file)
+    32 bytes base_sha256        (expected SHA-256 of the original game file)
   u32  record_count
   Records (repeated record_count times):
     u32  path_len + path UTF-8   (logical name, for logging)
@@ -74,14 +77,42 @@ After all records are written, the patcher verifies the SHA-256 of the whole
 original target file is renamed to `<target>.ffbak` and `.ffnew` is renamed to
 the target path.
 
+Before any file is written, the patcher validates every target path, confirms
+that each target exists, refuses to overwrite an existing `.ffbak` or stale
+`.ffnew`, and (for version 2) checks every original target's size and SHA-256.
+Target paths must be unique under Windows path comparison and cannot use
+alternate data streams, reserved device names, or ambiguous trailing dot/space
+components.
+This prevents applying a new patch to the wrong game build and protects an
+existing backup from being overwritten.
+
 If any target fails mid-apply, already-swapped targets are restored from their
 `.ffbak` and all `.ffnew` temps are deleted (rollback).
+For v2, the patcher also rechecks the moved `.ffbak` against the expected base
+hash before replacing the target. It creates `.ffnew` files exclusively and
+tracks only temporary files created by the current run. This catches a game or
+user changing files after preflight and preserves unowned files during rollback.
+If a target changes after installation while another target fails, rollback
+keeps the changed target and its `.ffbak` and reports the incomplete rollback.
+
+Version 1 patches remain readable for compatibility but do not verify original
+target hashes. FarsiForge builds new packages as version 2.
 
 ### Uninstall
 
-For each target in the patch, if `<target>.ffbak` exists, the patched file is
-deleted and `.ffbak` is renamed back to the target path. Uninstall needs only
-the patch file (for the target list) and the game folder.
+Before changing files, uninstall validates all target paths, rejects reparse
+points and stale `.ffnew` paths, and checks each present installed target
+against the patch's final size and SHA-256. For v2 it also verifies each
+`.ffbak` against the expected original size and SHA-256. A modified target or
+invalid backup aborts the whole operation while preserving both files.
+
+For valid targets, the installed file is moved to a temporary `.ffnew` path,
+then it is checked again against the patch's final hash before `.ffbak` is
+restored. The restored v2 original is also verified after the move. If
+validation or a later restore fails, already restored targets are moved back
+to their installed state. Temporary patched files are deleted only after all
+restores succeed. Uninstall needs the patch file (for the target list) and the
+game folder.
 
 ### Modes
 

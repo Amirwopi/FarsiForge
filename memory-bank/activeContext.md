@@ -1,35 +1,28 @@
 # Active Context
 
-## Project Goal
-FarsiForge aims to detect games across engine families, extract translatable text, support Persian translation and validation, inject translations where format support exists, and build installable/reversible patches. Engine support must be reported per capability; detection does not imply extraction or injection support.
+Updated: 2026-10-09
 
-## Repository Map
-- Main app: pkg/detection, pkg/extract, pkg/inject, pkg/core, pkg/installer, pkg/ffpatch, pkg/validate, Wails API in app.go, frontend in frontend/.
-- External Go tools: D:\FarsiForgeTools (fftools), consumed from Tools/fftools/; separate module and release lifecycle.
-- Standalone patcher: patcher/FarsiForgePatcher.cs, reads FFP1 produced by pkg/ffpatch.
-- Local-only game samples and tool payloads are ignored by Git. Do not delete ignored or untracked artifacts as generic cleanup.
+## Current checkpoint
 
-## Current Work
-A repository-wide quality audit is in progress across both Go projects, the UI, and the patch pipeline. Confirmed updates in this pass:
-- Removed one-off Python scripts that wrote directly to an absolute developer checkout path.
-- Removed the sample game path from the UI and disabled detection until a folder is selected.
-- Made project-root detection match the exact Go module name and search from the executable as well as the working directory.
-- Replaced drive-specific game search defaults with existing Steam/home folders plus environment overrides.
-- Removed date/version-specific tool executable names; Python discovery now honors FARISIFORGE_PYTHON.
-- Added FFP1 target path validation, installer input checks, and error propagation for patch finalization/readme/font staging.
-- Hardened the C# patch reader against unsafe paths, malformed strings, invalid record sources, and out-of-range payload references.
-- Hardened fftools PCK/text output paths and added regression coverage in the separate tools checkout.
+- The main repository is `D:\FarsiForge`; the format-tools repository is `D:\FarsiForgeTools`.
+- The requested folder transfer to `D:\FarsiForge-dev` was canceled. Do not resume it. Partial destination artifacts were left untouched; the two source repositories remain the working copies.
+- The current worktrees contain uncommitted changes. Preserve `D:\FarsiForge\Tools.rar` and `D:\FarsiForgeTools\internal\translation\`; do not commit or push unless directly requested.
+- Synthetic Godot end-to-end check passed: inject an existing Persian `.translation` into a disposable PCK, rebuild it, build an FFP1 package, apply with the C# CLI, uninstall, and compare the restored PCK byte-for-byte with the original.
+- Read-only real MOLDRISE v1.0.5 extraction succeeded: PCK v4 / Godot 4.7.0; 3,789 strings from 467 recovered text files after filtering editor add-on files and dictionary keys. All entries have unique IDs plus source file/line context. This build has no `.translation` catalog, so its recovered scene/script literals cannot currently be injected by the main Godot injector.
+- Full main-repository Go test, vet, and build passed after parser, PCK version, game-name, and persistence changes. `graphify update .` completed.
+- Two scratch directories from the first real extraction remain under `%TEMP%`. The prior C: full report is stale: latest check reports 12,474,654,720 bytes free on C: and 69,647,757,312 bytes free on D:. Keep large new scratch output on D:; do not bypass the earlier automatic-review rejection for recursive cleanup.
+- Injection now records SHA-256 hashes of source files for successfully staged targets. Patch creation rejects stale staged output if a game file changed after injection. Full `go test ./... -count=1`, `go vet ./...`, `go build ./...`, and `git diff --check` pass after this change.
 
-## Validation State
-Final audit checks passed: go test ./..., go vet ./..., go build ./..., golangci-lint run ./pkg/..., frontend lint/typecheck/production build, patcher C# build, FarsiForgeTools test/vet/build, and graphify update. The separate tools checkout contains a pre-existing untracked internal/translation/smaz.go; preserve it.
+## Next work
 
-## Known Support Limits
-- FromSoftware extraction is verified for ELDEN RING Data0 message bundles; broader BHD keys, BND3, and other DCX variants remain incomplete.
-- Godot .translation export/import commands are absent; recovered text resources still work. RAGE has a standalone GXT2 parser; RPF7 NG archive traversal and GTA V text extraction remain incomplete.
-- Injection coverage is narrower than detection/extraction: engine-specific injectors currently cover Unity and Unreal plus a generic path. Godot write-back explicitly reports unsupported. Other engine families need format-specific write support and validation.
-- .locres real-game validation and several proprietary/packed formats still need sample-based verification.
+- `subst` currently reports no Windows substituted drives. Volume GUID/mount-point alias identity is still unverified.
+- Added and passed a deterministic Windows interrupted-save test: a no-delete-share handle blocks replacement; the prior project file remains byte-identical and the temporary file is cleaned up.
+- The read-only Orc Massage Unity project contains 607/607 `raw_*` fallback entries, including false positives and real dialogue/UI. Those entries lack writable field identity; injection now rejects them up front and the UI labels the limitation. Unity write-back is still unverified. Current validation after this change passes Go tests/vet/build plus frontend lint and TypeScript check.
+- Continue the open items in root `todo.md`, starting with the full diff audit, Windows volume-alias identity, deterministic project-save failure coverage, and evidence-based format validation.
+- Validate Godot, Unity, Unreal, and other formats against representative real data only through read-only game inputs and disposable outputs. Synthetic results do not establish broad game compatibility.
 
-## Next Actions
-1. Extend real-game fixtures for formats still marked pending.
-2. Preserve unrelated local artifacts and keep README capability claims evidence-based.
-3. Continue implementing RPF7 and Godot .translation readers/writers.
+## Safety boundaries
+
+- Keep real game installations read-only; extraction/injection tests must stage under temporary or configured project storage.
+- Do not resume the canceled directory copy or clean up its partial target artifacts without a new request.
+- Do not send tasks to OpenCode.

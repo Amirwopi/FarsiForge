@@ -9,6 +9,8 @@
 package installer
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -28,6 +30,12 @@ type PatchTarget struct {
 	// PatchedFile is the absolute path to the already-patched file whose
 	// content will be embedded as a ModeReplace payload.
 	PatchedFile string `json:"patched_file"`
+	// OriginalFile is the unmodified game asset used for FFP1 v2 compatibility checks.
+	// If empty, GameRoot/GamePath is used.
+	OriginalFile string `json:"original_file,omitempty"`
+	// OriginalSHA256 is captured when injection stages the replacement. It
+	// prevents building a patch from stale staged output after a game update.
+	OriginalSHA256 string `json:"original_sha256,omitempty"`
 }
 
 // BuildConfig holds parameters for building the installer/patch package.
@@ -138,12 +146,16 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 }
 
 func validateBuildConfig(cfg BuildConfig) error {
+	if strings.TrimSpace(cfg.GameRoot) == "" {
+		return fmt.Errorf("installer: game_root is required to verify patch targets")
+	}
 	if cfg.PatcherExe != "" && !fileExists(cfg.PatcherExe) {
 		return fmt.Errorf("installer: patcher executable not found: %s", cfg.PatcherExe)
 	}
 	if cfg.FontFile != "" && !fileExists(cfg.FontFile) {
 		return fmt.Errorf("installer: font file not found: %s", cfg.FontFile)
 	}
+	seenGamePaths := make(map[string]struct{}, len(cfg.Targets))
 	for i, target := range cfg.Targets {
 		if !fileExists(target.PatchedFile) {
 			return fmt.Errorf("installer: target %d file not found: %s", i, target.PatchedFile)
@@ -159,8 +171,45 @@ func validateBuildConfig(cfg BuildConfig) error {
 		if gamePath == "" {
 			gamePath = filepath.Base(target.PatchedFile)
 		}
-		if _, err := cleanGamePath(gamePath); err != nil {
+		cleanGamePath, err := cleanGamePath(gamePath)
+		if err != nil {
 			return fmt.Errorf("installer: invalid target %d game path %q: %w", i, gamePath, err)
+		}
+		pathKey := strings.ToLower(cleanGamePath)
+		if _, exists := seenGamePaths[pathKey]; exists {
+			return fmt.Errorf("installer: duplicate target game path %q", cleanGamePath)
+		}
+		seenGamePaths[pathKey] = struct{}{}
+		originalPath := target.OriginalFile
+		if originalPath == "" {
+			originalPath = filepath.Join(cfg.GameRoot, filepath.FromSlash(gamePath))
+		}
+		if !fileExists(originalPath) {
+			return fmt.Errorf("installer: original target %d file not found: %s", i, originalPath)
+		}
+		if target.OriginalSHA256 != "" {
+			if len(target.OriginalSHA256) != sha256.Size*2 {
+				return fmt.Errorf("installer: target %d has an invalid original SHA-256", i)
+			}
+			if _, err := hex.DecodeString(target.OriginalSHA256); err != nil {
+				return fmt.Errorf("installer: target %d has an invalid original SHA-256: %w", i, err)
+			}
+			original, err := os.Open(originalPath)
+			if err != nil {
+				return fmt.Errorf("installer: open original target %d: %w", i, err)
+			}
+			hasher := sha256.New()
+			_, copyErr := io.Copy(hasher, original)
+			closeErr := original.Close()
+			if copyErr != nil {
+				return fmt.Errorf("installer: hash original target %d: %w", i, copyErr)
+			}
+			if closeErr != nil {
+				return fmt.Errorf("installer: close original target %d: %w", i, closeErr)
+			}
+			if !strings.EqualFold(target.OriginalSHA256, fmt.Sprintf("%x", hasher.Sum(nil))) {
+				return fmt.Errorf("installer: original target %q changed after injection; inject again before building the patch", cleanGamePath)
+			}
 		}
 	}
 	return nil
@@ -219,6 +268,33 @@ func writeFFP1Patch(patchPath string, cfg BuildConfig) (retErr error) {
 		if err != nil {
 			return err
 		}
+		originalPath := t.OriginalFile
+		if originalPath == "" {
+			originalPath = filepath.Join(cfg.GameRoot, filepath.FromSlash(gamePath))
+		}
+		original, err := os.Open(originalPath)
+		if err != nil {
+			return fmt.Errorf("open original target %s: %w", gamePath, err)
+		}
+		stat, statErr := original.Stat()
+		if statErr != nil {
+			_ = original.Close()
+			return fmt.Errorf("stat original target %s: %w", gamePath, statErr)
+		}
+		hasher := sha256.New()
+		if _, err := io.Copy(hasher, original); err != nil {
+			_ = original.Close()
+			return fmt.Errorf("hash original target %s: %w", gamePath, err)
+		}
+		if err := original.Close(); err != nil {
+			return fmt.Errorf("close original target %s: %w", gamePath, err)
+		}
+		if t.OriginalSHA256 != "" && !strings.EqualFold(t.OriginalSHA256, fmt.Sprintf("%x", hasher.Sum(nil))) {
+			return fmt.Errorf("original target %s changed after injection; inject again before building the patch", gamePath)
+		}
+		if err := target.SetBaseHash(hasher.Sum(nil), stat.Size()); err != nil {
+			return err
+		}
 		target.AddPayload(gamePath, data)
 	}
 
@@ -234,11 +310,36 @@ func cleanGamePath(name string) (string, error) {
 		return "", fmt.Errorf("path must be relative")
 	}
 	clean := path.Clean(name)
-	first := strings.SplitN(clean, "/", 2)[0]
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.Contains(first, ":") {
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
 		return "", fmt.Errorf("path must stay inside the game directory")
 	}
+	for _, component := range strings.Split(clean, "/") {
+		if component == "" || component == "." || component == ".." ||
+			strings.HasSuffix(component, ".") || strings.HasSuffix(component, " ") {
+			return "", fmt.Errorf("path contains a component with unsafe Windows semantics")
+		}
+		for _, r := range component {
+			if r < 32 || strings.ContainsRune(`<>:"|?*`, r) {
+				return "", fmt.Errorf("path contains a character unavailable in Windows filenames")
+			}
+		}
+		deviceName := strings.ToUpper(strings.SplitN(component, ".", 2)[0])
+		if isWindowsDeviceName(deviceName) {
+			return "", fmt.Errorf("path contains a reserved Windows device name")
+		}
+	}
 	return clean, nil
+}
+
+func isWindowsDeviceName(name string) bool {
+	switch name {
+	case "CON", "PRN", "AUX", "NUL",
+		"COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+		"LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9":
+		return true
+	default:
+		return false
+	}
 }
 
 // writeReadme writes a bilingual README.txt into the output directory.

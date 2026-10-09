@@ -168,13 +168,16 @@ type StringEntry struct {
 	Source      string `json:"source"`
 	Translation string `json:"translation,omitempty"`
 	File        string `json:"file"`
-	Path        string `json:"path"`
-	Context     string `json:"context,omitempty"`
-	Speaker     string `json:"speaker,omitempty"`
-	Line        int    `json:"line,omitempty"`
-	Status      Status `json:"status"`
-	Notes       string `json:"notes,omitempty"`
-	MaxLength   int    `json:"max_length,omitempty"`
+	// Container is the game-relative archive/pack path that contains File.
+	// It is empty when the source is a loose game file.
+	Container string `json:"container,omitempty"`
+	Path      string `json:"path"`
+	Context   string `json:"context,omitempty"`
+	Speaker   string `json:"speaker,omitempty"`
+	Line      int    `json:"line,omitempty"`
+	Status    Status `json:"status"`
+	Notes     string `json:"notes,omitempty"`
+	MaxLength int    `json:"max_length,omitempty"`
 }
 
 // PersianOptions controls how Persian text is processed for injection.
@@ -206,6 +209,7 @@ type Project struct {
 	GameName  string    `json:"game_name"`
 	GameRoot  string    `json:"game_root"`
 	Engine    string    `json:"engine"`
+	GameExe   string    `json:"game_exe,omitempty"`
 	Backend   string    `json:"backend,omitempty"`
 	Version   string    `json:"version,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
@@ -227,6 +231,9 @@ type Project struct {
 	// File tracking
 	ExtractedFiles []string `json:"extracted_files,omitempty"`
 	ModifiedFiles  []string `json:"modified_files,omitempty"`
+	// ModifiedFileHashes bind staged output to the exact installed source files
+	// used during the last successful injection.
+	ModifiedFileHashes map[string]string `json:"modified_file_hashes,omitempty"`
 
 	// Internal (not serialized)
 	projectFile string

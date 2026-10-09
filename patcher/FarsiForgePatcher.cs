@@ -6,7 +6,7 @@
 //
 //   Header:
 //     magic "FFP1" (4 ASCII bytes)
-//     u32  version = 1
+//     u32  version = 1 or 2 (v2 verifies the original target file hashes)
 //     metadata: 8 strings, each (u32 len + UTF-8 bytes):
 //       patch_name, game_name, game_exe, engine, patch_version,
 //       author, description, created_at (ISO 8601)
@@ -18,6 +18,7 @@
 //     u8   mode                    (0 = rebuild from records, 1 = replace = single payload record)
 //     i64  final_size              (uncompressed size of the final target file)
 //     32 bytes sha256              (of the final target file)
+//     v2 only: i64 base_size + 32 bytes base_sha256 (expected original game file)
 //     u32  record_count
 //     Records (repeated record_count times):
 //       u32  path_len + path UTF-8 (logical name, for logging)
@@ -81,6 +82,8 @@ namespace FarsiForgePatcher
         public byte Mode;          // 0 = rebuild from records, 1 = replace (single payload record)
         public long FinalSize;     // uncompressed size of the final target file
         public byte[] Sha256;      // 32 bytes, of the final target file
+        public long BaseSize;      // v2: expected original target size
+        public byte[] BaseSha256;  // v2: expected original target sha256
         public List<Record> Records = new List<Record>();
     }
 
@@ -110,7 +113,7 @@ namespace FarsiForgePatcher
             if (Encoding.ASCII.GetString(r.ReadBytes(4)) != "FFP1")
                 throw new Exception("not a valid FFP1 patch file");
             uint ver = r.ReadUInt32();
-            if (ver != 1) throw new Exception("unsupported patch version " + ver);
+            if (ver != 1 && ver != 2) throw new Exception("unsupported patch version " + ver);
             PatchInfo info = new PatchInfo();
             info.Version = ver;
             info.PatchName    = ReadString(r);
@@ -128,18 +131,29 @@ namespace FarsiForgePatcher
             info.TotalSize = 0;
             if (info.BlobSize < 0)
                 throw new Exception("invalid negative patch blob size");
+            HashSet<string> targetPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             for (uint i = 0; i < targetCount; i++)
             {
                 Target t = new Target();
                 t.Path = ReadString(r);
                 if (!IsSafeRelativePath(t.Path))
                     throw new Exception("unsafe target path: " + t.Path);
+                string normalizedTargetPath = Path.GetFullPath(t.Path.Replace('/', Path.DirectorySeparatorChar));
+                if (!targetPaths.Add(normalizedTargetPath))
+                    throw new Exception("duplicate target path: " + t.Path);
                 t.Mode = r.ReadByte();
                 if (t.Mode > 1) throw new Exception("unsupported target mode " + t.Mode);
                 t.FinalSize = r.ReadInt64();
                 if (t.FinalSize < 0) throw new Exception("invalid target size: " + t.Path);
                 t.Sha256 = r.ReadBytes(32);
                 if (t.Sha256.Length != 32) throw new EndOfStreamException("truncated target hash");
+                if (ver >= 2)
+                {
+                    t.BaseSize = r.ReadInt64();
+                    if (t.BaseSize < 0) throw new Exception("invalid target base size: " + t.Path);
+                    t.BaseSha256 = r.ReadBytes(32);
+                    if (t.BaseSha256.Length != 32) throw new EndOfStreamException("truncated target base hash");
+                }
                 uint recCount = r.ReadUInt32();
                 for (uint j = 0; j < recCount; j++)
                 {
@@ -189,27 +203,24 @@ namespace FarsiForgePatcher
         public static void ApplyAll(PatchInfo info, string patchPath, string gameDir,
             Action<long, long> progress, Action<string> log)
         {
-            List<string> swapped = new List<string>(); // game-relative paths already swapped
-            List<string> temps = new List<string>();   // .ffnew paths created
+            List<Target> swapped = new List<Target>(); // targets with originals moved to .ffbak
+            List<Target> created = new List<Target>(); // targets that did not exist before a legacy rebuild
+            List<string> temps = new List<string>();   // .ffnew paths created by this run
             long bytesDone = 0;
             long bytesTotal = info.TotalSize;
 
             try
             {
+                ValidateTargets(info, gameDir);
                 foreach (Target t in info.Targets)
                 {
-                    if (!IsSafeRelativePath(t.Path))
-                        throw new Exception("unsafe target path: " + t.Path);
                     string absTarget = LongPath(Path.Combine(gameDir, t.Path));
                     string ffnew = absTarget + ".ffnew";
                     string ffbak = absTarget + ".ffbak";
 
-                    EnsureParentDir(ffnew);
-                    if (File.Exists(ffnew)) File.Delete(ffnew);
-                    temps.Add(ffnew);
-
                     if (log != null) log("در حال اعمال فایل‌ها: " + t.Path);
-                    ApplyTarget(info, t, patchPath, gameDir, ffnew, ref bytesDone, bytesTotal, progress, log);
+                    ApplyTarget(info, t, patchPath, gameDir, ffnew, ref bytesDone, bytesTotal, progress, log,
+                        delegate(string createdTemp) { temps.Add(createdTemp); });
 
                     // verify final sha256 of .ffnew
                     if (log != null) log("بررسی صحت فایل‌ها: " + t.Path);
@@ -222,11 +233,17 @@ namespace FarsiForgePatcher
 
                     // swap: original -> .ffbak, .ffnew -> target
                     if (log != null) log("در حال پشتیبان‌گیری: " + t.Path);
-                    if (File.Exists(ffbak)) File.Delete(ffbak);
-                    if (File.Exists(absTarget)) File.Move(absTarget, ffbak);
+                    bool hadOriginal = File.Exists(absTarget);
+                    if (hadOriginal)
+                    {
+                        File.Move(absTarget, ffbak);
+                        swapped.Add(t);
+                        if (info.Version >= 2 && !FileMatches(ffbak, t.BaseSize, t.BaseSha256))
+                            throw new Exception("target changed while the patch was being prepared: " + t.Path);
+                    }
                     File.Move(ffnew, absTarget);
+                    if (!hadOriginal) created.Add(t);
 
-                    swapped.Add(t.Path);
                     if (log != null) log("نصب شد: " + t.Path);
                 }
                 if (progress != null) progress(bytesTotal, bytesTotal);
@@ -235,36 +252,115 @@ namespace FarsiForgePatcher
             {
                 // rollback
                 if (log != null) log("خطا: در حال بازگردانی تغییرات…");
-                foreach (string rel in swapped)
+                List<string> rollbackErrors = new List<string>();
+                foreach (Target t in swapped)
+                {
+                    string abs = LongPath(Path.Combine(gameDir, t.Path));
+                    string ffbak = abs + ".ffbak";
+                    try
+                    {
+                        if (File.Exists(ffbak))
+                        {
+                            if (File.Exists(abs))
+                            {
+                                if (!FileMatches(abs, t.FinalSize, t.Sha256))
+                                {
+                                    rollbackErrors.Add(t.Path + ": preserved an unexpected file; original remains at .ffbak");
+                                    continue;
+                                }
+                                File.Delete(abs);
+                            }
+                            File.Move(ffbak, abs);
+                        }
+                        else rollbackErrors.Add(t.Path + ": original .ffbak is missing");
+                    }
+                    catch (Exception rollbackEx) { rollbackErrors.Add(t.Path + ": " + rollbackEx.Message); }
+                }
+                foreach (Target t in created)
                 {
                     try
                     {
-                        string abs = LongPath(Path.Combine(gameDir, rel));
-                        string ffbak = abs + ".ffbak";
-                        if (File.Exists(ffbak))
+                        string abs = LongPath(Path.Combine(gameDir, t.Path));
+                        if (File.Exists(abs))
                         {
-                            if (File.Exists(abs)) File.Delete(abs);
-                            File.Move(ffbak, abs);
+                            if (FileMatches(abs, t.FinalSize, t.Sha256)) File.Delete(abs);
+                            else rollbackErrors.Add(t.Path + ": preserved an unexpected file created during rollback");
                         }
                     }
-                    catch { /* best-effort */ }
+                    catch (Exception rollbackEx) { rollbackErrors.Add(t.Path + ": " + rollbackEx.Message); }
                 }
                 foreach (string tmp in temps)
                 {
                     try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
                 }
-                throw new Exception("rollback: " + ex.Message, ex);
+                throw new Exception("rollback: " + ex.Message +
+                    (rollbackErrors.Count == 0 ? "" : "; rollback errors: " + String.Join("; ", rollbackErrors)), ex);
+            }
+        }
+
+        private static void ValidateTargets(PatchInfo info, string gameDir)
+        {
+            HashSet<string> targetPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (Target t in info.Targets)
+            {
+                if (!IsSafeRelativePath(t.Path))
+                    throw new Exception("unsafe target path: " + t.Path);
+                string absTarget = LongPath(Path.GetFullPath(Path.Combine(gameDir, t.Path)));
+                if (!targetPaths.Add(absTarget))
+                    throw new Exception("duplicate target path: " + t.Path);
+                string ffnew = absTarget + ".ffnew";
+                string ffbak = absTarget + ".ffbak";
+                EnsureNoReparsePoints(gameDir, t.Path);
+                if (!File.Exists(absTarget) && !(info.Version == 1 && t.Mode == 0))
+                    throw new Exception("target file is missing: " + t.Path);
+                if (File.Exists(ffbak))
+                    throw new Exception("backup already exists; uninstall the current patch first: " + t.Path);
+                if (File.Exists(ffnew))
+                    throw new Exception("stale temporary file exists; inspect before retrying: " + t.Path);
+                foreach (Record rec in t.Records)
+                {
+                    if (rec.Src == 0)
+                        EnsureNoReparsePoints(gameDir, rec.BasePath);
+                }
+                if (info.Version >= 2)
+                {
+                    FileInfo fileInfo = new FileInfo(absTarget);
+                    if (fileInfo.Length != t.BaseSize)
+                        throw new Exception("target size does not match this patch's game version: " + t.Path);
+                    byte[] actual;
+                    using (FileStream stream = File.OpenRead(absTarget))
+                    using (SHA256 sha = SHA256.Create()) actual = sha.ComputeHash(stream);
+                    if (!BytesEq(actual, t.BaseSha256))
+                        throw new Exception("target hash does not match this patch's game version: " + t.Path);
+                }
+            }
+        }
+
+        private static void EnsureNoReparsePoints(string gameDir, string relativePath)
+        {
+            string current = Path.GetFullPath(gameDir);
+            string normalized = relativePath.Replace('\\', '/');
+            string[] parts = normalized.Split('/');
+            for (int i = 0; i < parts.Length; i++)
+            {
+                current = Path.Combine(current, parts[i]);
+                bool isLast = i == parts.Length - 1;
+                if (!Directory.Exists(current) && !(isLast && File.Exists(current)))
+                    continue;
+                if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                    throw new Exception("target path contains a reparse point: " + relativePath);
             }
         }
 
         // Write a single target's .ffnew by streaming its records.
         private static void ApplyTarget(PatchInfo info, Target t, string patchPath, string gameDir,
             string outPath, ref long bytesDone, long bytesTotal,
-            Action<long, long> progress, Action<string> log)
+            Action<long, long> progress, Action<string> log, Action<string> tempCreated)
         {
             using (FileStream pf = File.OpenRead(patchPath))
-            using (FileStream of = File.Open(outPath, FileMode.Create, FileAccess.Write, FileShare.None))
+            using (FileStream of = File.Open(outPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             {
+                if (tempCreated != null) tempCreated(outPath);
                 byte[] buf = new byte[1024 * 1024];
                 long written = 0;
                 foreach (Record rec in t.Records)
@@ -272,6 +368,7 @@ namespace FarsiForgePatcher
                     long copied = 0;
                     if (rec.Src == 0)
                     {
+                        EnsureNoReparsePoints(gameDir, rec.BasePath);
                         string baseAbs = LongPath(Path.Combine(gameDir, rec.BasePath));
                         if (!File.Exists(baseAbs))
                             throw new Exception("base file missing: " + rec.BasePath);
@@ -322,23 +419,127 @@ namespace FarsiForgePatcher
 
         public static void UninstallAll(PatchInfo info, string gameDir, Action<string> log)
         {
+            HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            List<Target> restoreTargets = new List<Target>();
+
+            // Validate every candidate before restoring any file. A patched
+            // file may have been edited since installation; never delete it
+            // unless it still matches the file recorded in the patch.
             foreach (Target t in info.Targets)
             {
                 if (!IsSafeRelativePath(t.Path))
                     throw new Exception("unsafe target path: " + t.Path);
+                if (!seen.Add(t.Path.Replace('\\', '/')))
+                    throw new Exception("duplicate target path in patch: " + t.Path);
+
                 string abs = LongPath(Path.Combine(gameDir, t.Path));
                 string ffbak = abs + ".ffbak";
+                string ffnew = abs + ".ffnew";
+                EnsureNoReparsePoints(gameDir, t.Path);
+                EnsureNoReparsePoints(gameDir, t.Path + ".ffbak");
+                EnsureNoReparsePoints(gameDir, t.Path + ".ffnew");
+
+                if (File.Exists(ffnew) || Directory.Exists(ffnew))
+                    throw new Exception("temporary file already exists; inspect before uninstalling: " + t.Path);
+                if (Directory.Exists(ffbak))
+                    throw new Exception("backup path is a directory: " + t.Path);
+
                 if (File.Exists(ffbak))
                 {
-                    if (File.Exists(abs)) File.Delete(abs);
-                    File.Move(ffbak, abs);
-                    if (log != null) log("بازگردانی شد: " + t.Path);
+                    if (File.Exists(abs) && !FileMatches(abs, t.FinalSize, t.Sha256))
+                        throw new Exception("installed target was modified; preserving it and its backup: " + t.Path);
+                    if (info.Version >= 2 && !FileMatches(ffbak, t.BaseSize, t.BaseSha256))
+                        throw new Exception("original backup does not match this patch's game version: " + t.Path);
+                    restoreTargets.Add(t);
                 }
-                else
+                else if (File.Exists(abs) && !Directory.Exists(abs))
                 {
                     if (log != null) log("پشتیبانی برای این فایل یافت نشد: " + t.Path);
                 }
             }
+
+            List<Target> restored = new List<Target>();
+            List<Target> stagedPatched = new List<Target>();
+            try
+            {
+                foreach (Target t in restoreTargets)
+                {
+                    string abs = LongPath(Path.Combine(gameDir, t.Path));
+                    string ffbak = abs + ".ffbak";
+                    string ffnew = abs + ".ffnew";
+                    bool hadInstalledFile = File.Exists(abs);
+                    if (log != null) log("در حال بررسی فایل نصب‌شده: " + t.Path);
+                    if (hadInstalledFile)
+                    {
+                        File.Move(abs, ffnew);
+                        stagedPatched.Add(t);
+                    }
+                    try
+                    {
+                        if (hadInstalledFile && !FileMatches(ffnew, t.FinalSize, t.Sha256))
+                            throw new Exception("installed target changed while uninstall was being prepared: " + t.Path);
+                        File.Move(ffbak, abs);
+                        restored.Add(t);
+                        if (info.Version >= 2 && !FileMatches(abs, t.BaseSize, t.BaseSha256))
+                            throw new Exception("original backup changed while uninstall was being prepared: " + t.Path);
+                    }
+                    catch
+                    {
+                        if (hadInstalledFile && File.Exists(ffnew) && !File.Exists(abs))
+                            File.Move(ffnew, abs);
+                        throw;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                List<string> rollbackErrors = new List<string>();
+                for (int i = restored.Count - 1; i >= 0; i--)
+                {
+                    Target t = restored[i];
+                    string abs = LongPath(Path.Combine(gameDir, t.Path));
+                    string ffbak = abs + ".ffbak";
+                    string ffnew = abs + ".ffnew";
+                    try
+                    {
+                        if (File.Exists(abs) && !File.Exists(ffbak)) File.Move(abs, ffbak);
+                        if (File.Exists(ffnew) && !File.Exists(abs)) File.Move(ffnew, abs);
+                    }
+                    catch (Exception rollbackEx)
+                    {
+                        rollbackErrors.Add(t.Path + ": " + rollbackEx.Message);
+                    }
+                }
+                throw new Exception("uninstall failed: " + ex.Message +
+                    (rollbackErrors.Count == 0 ? "; previous files restored to their installed state" :
+                    "; rollback errors: " + String.Join("; ", rollbackErrors)), ex);
+            }
+
+            foreach (Target t in stagedPatched)
+            {
+                string ffnew = LongPath(Path.Combine(gameDir, t.Path)) + ".ffnew";
+                try
+                {
+                    if (File.Exists(ffnew)) File.Delete(ffnew);
+                }
+                catch (Exception ex)
+                {
+                    if (log != null) log("هشدار: فایل موقت حذف نشد: " + t.Path + " (" + ex.Message + ")");
+                }
+            }
+            foreach (Target t in restoreTargets)
+                if (log != null) log("بازگردانی شد: " + t.Path);
+        }
+
+        private static bool FileMatches(string path, long expectedSize, byte[] expectedSha256)
+        {
+            FileInfo fi = new FileInfo(path);
+            if (!fi.Exists || fi.Length != expectedSize || expectedSha256 == null || expectedSha256.Length != 32)
+                return false;
+            byte[] actual;
+            using (FileStream stream = File.OpenRead(path))
+            using (SHA256 sha = SHA256.Create()) actual = sha.ComputeHash(stream);
+            return BytesEq(actual, expectedSha256);
         }
 
         // ---- helpers ----
@@ -360,9 +561,37 @@ namespace FarsiForgePatcher
             string normalized = value.Replace('\\', '/');
             if (normalized.StartsWith("/", StringComparison.Ordinal)) return false;
             string[] parts = normalized.Split('/');
-            if (parts[0].Contains(":")) return false;
             foreach (string part in parts)
-                if (part == "..") return false;
+            {
+                if (part.Length == 0 || part == "." || part == ".." || part.EndsWith(".", StringComparison.Ordinal) ||
+                    part.EndsWith(" ", StringComparison.Ordinal)) return false;
+                foreach (char ch in part)
+                    if (ch < 32 || ch == ':' || ch == '<' || ch == '>' || ch == '"' || ch == '|' || ch == '?' || ch == '*')
+                        return false;
+                string deviceName = part.Split('.')[0];
+                if (deviceName.Equals("CON", StringComparison.OrdinalIgnoreCase) ||
+                    deviceName.Equals("PRN", StringComparison.OrdinalIgnoreCase) ||
+                    deviceName.Equals("AUX", StringComparison.OrdinalIgnoreCase) ||
+                    deviceName.Equals("NUL", StringComparison.OrdinalIgnoreCase) ||
+                    deviceName.Equals("COM1", StringComparison.OrdinalIgnoreCase) ||
+                    deviceName.Equals("COM2", StringComparison.OrdinalIgnoreCase) ||
+                    deviceName.Equals("COM3", StringComparison.OrdinalIgnoreCase) ||
+                    deviceName.Equals("COM4", StringComparison.OrdinalIgnoreCase) ||
+                    deviceName.Equals("COM5", StringComparison.OrdinalIgnoreCase) ||
+                    deviceName.Equals("COM6", StringComparison.OrdinalIgnoreCase) ||
+                    deviceName.Equals("COM7", StringComparison.OrdinalIgnoreCase) ||
+                    deviceName.Equals("COM8", StringComparison.OrdinalIgnoreCase) ||
+                    deviceName.Equals("COM9", StringComparison.OrdinalIgnoreCase) ||
+                    deviceName.Equals("LPT1", StringComparison.OrdinalIgnoreCase) ||
+                    deviceName.Equals("LPT2", StringComparison.OrdinalIgnoreCase) ||
+                    deviceName.Equals("LPT3", StringComparison.OrdinalIgnoreCase) ||
+                    deviceName.Equals("LPT4", StringComparison.OrdinalIgnoreCase) ||
+                    deviceName.Equals("LPT5", StringComparison.OrdinalIgnoreCase) ||
+                    deviceName.Equals("LPT6", StringComparison.OrdinalIgnoreCase) ||
+                    deviceName.Equals("LPT7", StringComparison.OrdinalIgnoreCase) ||
+                    deviceName.Equals("LPT8", StringComparison.OrdinalIgnoreCase) ||
+                    deviceName.Equals("LPT9", StringComparison.OrdinalIgnoreCase)) return false;
+            }
             return true;
         }
 

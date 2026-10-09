@@ -165,7 +165,15 @@ func (l *Logger) log(level Level, msg string, args ...interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	if len(args) > 0 {
+	fields := make(Fields, len(l.fields)+len(args)/2)
+	for key, value := range l.fields {
+		fields[key] = value
+	}
+	if isFieldList(msg, args) {
+		for i := 0; i < len(args); i += 2 {
+			fields[args[i].(string)] = args[i+1]
+		}
+	} else if len(args) > 0 {
 		msg = fmt.Sprintf(msg, args...)
 	}
 
@@ -175,7 +183,7 @@ func (l *Logger) log(level Level, msg string, args ...interface{}) {
 		Level:     level.String(),
 		Module:    l.module,
 		Message:   msg,
-		Fields:    l.fields,
+		Fields:    fields,
 	}
 
 	// Buffer for UI
@@ -193,9 +201,9 @@ func (l *Logger) log(level Level, msg string, args ...interface{}) {
 	)
 
 	// Add fields
-	if len(l.fields) > 0 {
-		parts := make([]string, 0, len(l.fields))
-		for k, v := range l.fields {
+	if len(fields) > 0 {
+		parts := make([]string, 0, len(fields))
+		for k, v := range fields {
 			parts = append(parts, fmt.Sprintf("%s=%v", k, v))
 		}
 		line += " {" + strings.Join(parts, ", ") + "}"
@@ -211,6 +219,19 @@ func (l *Logger) log(level Level, msg string, args ...interface{}) {
 	if level == LevelFatal {
 		os.Exit(1)
 	}
+}
+
+func isFieldList(message string, args []interface{}) bool {
+	if len(args) == 0 || len(args)%2 != 0 || strings.Contains(message, "%") {
+		return false
+	}
+	for i := 0; i < len(args); i += 2 {
+		key, ok := args[i].(string)
+		if !ok || key == "" {
+			return false
+		}
+	}
+	return true
 }
 
 // Debug logs a debug message.

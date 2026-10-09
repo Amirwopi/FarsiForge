@@ -31,8 +31,28 @@ func (p *Project) Save(path string) error {
 	if err != nil {
 		return fmt.Errorf("marshal project: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create project directory: %w", err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".project-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temporary project file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
 		return fmt.Errorf("write project file: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync project file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close project file: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("replace project file: %w", err)
 	}
 	p.projectFile = path
 	return nil
@@ -140,6 +160,50 @@ func (p *Project) ImportTranslations(translations map[string]string) int {
 	}
 	p.UpdatedAt = time.Now()
 	return count
+}
+
+// MergeTranslations carries existing work into a freshly extracted project
+// only when the source file, key, context, and source text all still match.
+func (p *Project) MergeTranslations(previous *Project) int {
+	if previous == nil {
+		return 0
+	}
+	byIdentity := make(map[stringEntryIdentity]StringEntry, len(previous.Entries))
+	for _, entry := range previous.Entries {
+		byIdentity[entryIdentity(entry)] = entry
+	}
+	merged := 0
+	for i := range p.Entries {
+		old, ok := byIdentity[entryIdentity(p.Entries[i])]
+		if !ok {
+			continue
+		}
+		p.Entries[i].Translation = old.Translation
+		p.Entries[i].Status = old.Status
+		if p.Entries[i].Translation != "" {
+			p.Entries[i].Notes = textfilter.QANotes(textfilter.QA(p.Entries[i].Source, old.Translation))
+		}
+		merged++
+	}
+	return merged
+}
+
+type stringEntryIdentity struct {
+	container string
+	file      string
+	path      string
+	context   string
+	source    string
+}
+
+func entryIdentity(entry StringEntry) stringEntryIdentity {
+	return stringEntryIdentity{
+		container: entry.Container,
+		file:      entry.File,
+		path:      entry.Path,
+		context:   entry.Context,
+		source:    entry.Source,
+	}
 }
 
 // GroupByFile returns entries grouped by their source file.

@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +13,7 @@ import (
 	"farsiforge/pkg/extract"
 	"farsiforge/pkg/inject"
 	"farsiforge/pkg/installer"
+	"farsiforge/pkg/textfilter"
 	"farsiforge/pkg/tools"
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -163,7 +164,11 @@ func (a *App) InstallPythonPackage(name string) (string, error) {
 
 // DetectEngine runs the engine detection.
 func (a *App) DetectEngine(path string) (*core.GameInfo, error) {
-	res, err := a.registry.Detect(path)
+	gameRoot, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve game directory: %w", err)
+	}
+	res, err := a.registry.Detect(gameRoot)
 	if err != nil {
 		return nil, fmt.Errorf("detection failed: %v", err)
 	}
@@ -172,14 +177,18 @@ func (a *App) DetectEngine(path string) (*core.GameInfo, error) {
 	if len(res.DataPaths) > 0 {
 		dataPath = res.DataPaths[0]
 	}
+	gameName := strings.TrimSpace(res.GameName)
+	if gameName == "" {
+		gameName = filepath.Base(gameRoot)
+	}
 
 	return &core.GameInfo{
 		Engine:     res.Engine,
 		Backend:    res.Backend,
 		Version:    res.Version,
-		GameName:   res.GameName,
+		GameName:   gameName,
 		GameExe:    res.GameExe,
-		GameRoot:   path,
+		GameRoot:   gameRoot,
 		DataPath:   dataPath,
 		Confidence: res.Confidence,
 		Evidence:   res.Evidence,
@@ -189,20 +198,33 @@ func (a *App) DetectEngine(path string) (*core.GameInfo, error) {
 
 // Extract runs the extraction pipeline.
 func (a *App) Extract(info *core.GameInfo) (int, error) {
-	proj := core.NewProject("Local Project", info.GameRoot, info.Engine)
+	if info == nil {
+		return 0, fmt.Errorf("game information is required")
+	}
+	previous, loadErr := core.LoadGameProject(info.GameRoot)
+	if loadErr != nil && !errors.Is(loadErr, os.ErrNotExist) {
+		return 0, fmt.Errorf("load existing project: %w", loadErr)
+	}
+	gameName := strings.TrimSpace(info.GameName)
+	if gameName == "" {
+		gameName = filepath.Base(filepath.Clean(info.GameRoot))
+	}
+	proj, projectPath, err := core.NewGameProject(gameName+" Localization", info.GameRoot, info.Engine)
+	if err != nil {
+		return 0, err
+	}
+	proj.GameName = gameName
+	proj.GameExe = info.GameExe
+	proj.Backend = info.Backend
+	proj.Version = info.Version
 
 	if err := extract.Run(a.ctx, info, proj, a.toolReg); err != nil {
 		return 0, fmt.Errorf("extraction failed: %v", err)
 	}
-
-	// Ensure the project directory exists before saving.
-	projDir := info.GameRoot
-	if err := os.MkdirAll(projDir, 0o755); err != nil {
-		return 0, fmt.Errorf("failed to create project directory: %v", err)
+	if previous != nil {
+		proj.MergeTranslations(previous)
 	}
-
-	projPath := filepath.Join(projDir, ".farsiforge_project.json")
-	if err := proj.Save(projPath); err != nil {
+	if err := proj.Save(projectPath); err != nil {
 		return 0, fmt.Errorf("failed to save project: %v", err)
 	}
 
@@ -211,17 +233,37 @@ func (a *App) Extract(info *core.GameInfo) (int, error) {
 
 // Inject runs the injection pipeline.
 func (a *App) Inject(info *core.GameInfo) (int, error) {
-	projPath := filepath.Join(info.GameRoot, ".farsiforge_project.json")
-	proj, err := core.LoadProject(projPath)
+	if info == nil {
+		return 0, fmt.Errorf("game information is required")
+	}
+	proj, err := core.LoadGameProject(info.GameRoot)
 	if err != nil {
-		proj = core.NewProject("Local Project", info.GameRoot, info.Engine)
+		return 0, fmt.Errorf("load project: %w", err)
+	}
+	if proj.Engine != info.Engine {
+		return 0, fmt.Errorf("project engine %q does not match detected engine %q", proj.Engine, info.Engine)
+	}
+	projectPath, err := core.ProjectFilePath(info.GameRoot)
+	if err != nil {
+		return 0, err
+	}
+	proj.ModifiedFiles = nil
+	proj.ModifiedFileHashes = nil
+	if err := proj.Save(projectPath); err != nil {
+		return 0, fmt.Errorf("clear previous staged injection state: %w", err)
 	}
 
-	opts := core.DefaultPersianOptions()
+	opts := proj.PersianOpts
+	if opts == (core.PersianOptions{}) {
+		opts = core.DefaultPersianOptions()
+	}
 
 	modified, err := inject.Run(a.ctx, info, proj, a.toolReg, opts)
 	if err != nil {
 		return 0, fmt.Errorf("injection failed: %v", err)
+	}
+	if err := proj.Save(projectPath); err != nil {
+		return 0, fmt.Errorf("save injection results: %w", err)
 	}
 
 	return len(modified), nil
@@ -250,8 +292,7 @@ func (a *App) SelectDirectory() (string, error) {
 
 // GetProject loads the project
 func (a *App) GetProject(gameRoot string) (*core.Project, error) {
-	projPath := filepath.Join(gameRoot, ".farsiforge_project.json")
-	return core.LoadProject(projPath)
+	return core.LoadGameProject(gameRoot)
 }
 
 // SearchEntries loads the project saved under gameRoot and returns the
@@ -268,13 +309,54 @@ func (a *App) SearchEntries(gameRoot, query, status string) ([]core.StringEntry,
 
 // SaveTranslations saves translations
 func (a *App) SaveTranslations(gameRoot string, entries []core.StringEntry) error {
-	projPath := filepath.Join(gameRoot, ".farsiforge_project.json")
-	proj, err := core.LoadProject(projPath)
+	proj, err := core.LoadGameProject(gameRoot)
 	if err != nil {
 		return err
 	}
-	proj.Entries = entries
-	return proj.Save(projPath)
+	projectIndexes := make(map[string]int, len(proj.Entries))
+	for i, entry := range proj.Entries {
+		if entry.ID == "" {
+			return fmt.Errorf("project entry at index %d is missing its stable ID", i)
+		}
+		if _, exists := projectIndexes[entry.ID]; exists {
+			return fmt.Errorf("project contains duplicate entry ID %q", entry.ID)
+		}
+		projectIndexes[entry.ID] = i
+	}
+	byID := make(map[string]core.StringEntry, len(entries))
+	for _, entry := range entries {
+		if entry.ID == "" {
+			return fmt.Errorf("translation entry is missing its stable ID")
+		}
+		if _, exists := byID[entry.ID]; exists {
+			return fmt.Errorf("duplicate translation entry ID %q", entry.ID)
+		}
+		if _, exists := projectIndexes[entry.ID]; !exists {
+			return fmt.Errorf("translation entry %q is not part of the current project; reload before saving", entry.ID)
+		}
+		switch entry.Status {
+		case core.StatusUntranslated, core.StatusTranslated, core.StatusApproved, core.StatusSkipped:
+		default:
+			return fmt.Errorf("invalid translation status %q for entry %q", entry.Status, entry.ID)
+		}
+		byID[entry.ID] = entry
+	}
+	for id, incoming := range byID {
+		i := projectIndexes[id]
+		proj.Entries[i].Translation = incoming.Translation
+		proj.Entries[i].Status = incoming.Status
+		if proj.Entries[i].Translation == "" && proj.Entries[i].Status != core.StatusSkipped {
+			proj.Entries[i].Status = core.StatusUntranslated
+		} else if proj.Entries[i].Translation != "" && proj.Entries[i].Status == core.StatusUntranslated {
+			proj.Entries[i].Status = core.StatusTranslated
+		}
+		proj.Entries[i].Notes = textfilter.QANotes(textfilter.QA(proj.Entries[i].Source, proj.Entries[i].Translation))
+	}
+	projectPath, err := core.ProjectFilePath(gameRoot)
+	if err != nil {
+		return err
+	}
+	return proj.Save(projectPath)
 }
 
 // ── Patcher build ───────────────────────────────────────────────────
@@ -292,8 +374,7 @@ type BuildPatcherResult struct {
 // from the project's ModifiedFiles list; their patched content is read from
 // the project working directory.
 func (a *App) BuildPatcher(gameRoot string, credits string) (*BuildPatcherResult, error) {
-	projPath := filepath.Join(gameRoot, ".farsiforge_project.json")
-	proj, err := core.LoadProject(projPath)
+	proj, err := core.LoadGameProject(gameRoot)
 	if err != nil {
 		return nil, fmt.Errorf("load project: %v", err)
 	}
@@ -311,33 +392,27 @@ func (a *App) BuildPatcher(gameRoot string, credits string) (*BuildPatcherResult
 	// the game-relative path to the patched file in workDir.
 	workDir := proj.WorkingDir
 	if workDir == "" {
-		workDir = filepath.Join(filepath.Dir(projPath), "work")
+		return nil, fmt.Errorf("project working directory is not configured")
 	}
 
 	var targets []installer.PatchTarget
 	for _, mf := range proj.ModifiedFiles {
-		gamePath := mf
-		// Modified files may be stored as game-relative or absolute paths.
-		patchedFile := filepath.Join(workDir, filepath.Base(mf))
-		if !filepath.IsAbs(mf) {
-			// If the patched copy exists in workDir, use it; otherwise assume
-			// the file was patched in-place in the game tree.
-			if fileExists(patchedFile) {
-				targets = append(targets, installer.PatchTarget{
-					GamePath:    gamePath,
-					PatchedFile: patchedFile,
-				})
-				continue
-			}
-			patchedFile = filepath.Join(gameRoot, mf)
+		gamePath := filepath.ToSlash(mf)
+		if filepath.IsAbs(mf) || strings.Contains(gamePath, "../") || gamePath == ".." {
+			return nil, fmt.Errorf("invalid modified game path %q", mf)
 		}
+		patchedFile := filepath.Join(workDir, "out", filepath.FromSlash(gamePath))
 		if !fileExists(patchedFile) {
-			// Skip missing files rather than failing the whole build.
-			continue
+			return nil, fmt.Errorf("staged patched file missing for %q: %s", mf, patchedFile)
+		}
+		originalHash := proj.ModifiedFileHashes[mf]
+		if originalHash == "" {
+			return nil, fmt.Errorf("staged source hash missing for %q; inject again before building the patch", mf)
 		}
 		targets = append(targets, installer.PatchTarget{
-			GamePath:    gamePath,
-			PatchedFile: patchedFile,
+			GamePath:       gamePath,
+			PatchedFile:    patchedFile,
+			OriginalSHA256: originalHash,
 		})
 	}
 
@@ -345,12 +420,12 @@ func (a *App) BuildPatcher(gameRoot string, credits string) (*BuildPatcherResult
 		return nil, fmt.Errorf("no patched files found to build a patch (run injection first)")
 	}
 
-	outputDir := filepath.Join(gameRoot, "FarsiForge_Patch")
+	outputDir := filepath.Join(proj.ProjectDir, "dist")
 	cfg := installer.BuildConfig{
 		GameRoot:    gameRoot,
 		Targets:     targets,
 		PatcherExe:  patcherExe,
-		GameExe:     proj.GameName,
+		GameExe:     proj.GameExe,
 		Engine:      proj.Engine,
 		PatchName:   proj.GameName + " — فارسی‌ساز",
 		Description: "FarsiForge Persian localization patch",
@@ -378,7 +453,3 @@ func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
 }
-
-// _ keeps encoding/json imported for future use without an unused-import
-// error if Settings serialization helpers are added later.
-var _ = json.Marshal

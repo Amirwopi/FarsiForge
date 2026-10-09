@@ -4,13 +4,16 @@ import (
 	"context"
 	"encoding/csv"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
-	"farsiforge/pkg/backup"
 	"farsiforge/pkg/core"
 	"farsiforge/pkg/persian"
 	"farsiforge/pkg/scanner"
@@ -21,10 +24,16 @@ import (
 
 // scriptSummary is the tolerant parse of the trailing "SUMMARY: {json}" line.
 type scriptSummary struct {
-	Reconstructed int            `json:"reconstructed,omitempty"`
-	Targets       map[string]int `json:"targets,omitempty"`
-	Files         int            `json:"files,omitempty"`
-	Strings       int            `json:"strings,omitempty"`
+	Reconstructed     int            `json:"reconstructed,omitempty"`
+	Targets           map[string]int `json:"targets,omitempty"`
+	Files             int            `json:"files,omitempty"`
+	Strings           int            `json:"strings,omitempty"`
+	Injected          int            `json:"injected,omitempty"`
+	NotFound          int            `json:"not_found,omitempty"`
+	SkippedNoTypeTree int            `json:"skipped_no_typetree,omitempty"`
+	Errors            int            `json:"errors,omitempty"`
+	FilesModified     int            `json:"files_modified,omitempty"`
+	ModifiedFiles     []string       `json:"modified_files,omitempty"`
 }
 
 type scriptResult struct {
@@ -155,54 +164,34 @@ func (i *UnityInjector) Capabilities() core.InjectorCaps {
 
 func (i *UnityInjector) Inject(ctx context.Context, info *core.GameInfo, proj *core.Project, reg core.ToolRegistry, opts core.PersianOptions) (*core.InjectionResult, error) {
 	res := &core.InjectionResult{}
+	translatedEntries := proj.FindTranslated()
+	if len(translatedEntries) == 0 {
+		return res, core.NewError("inject", "no translated entries are ready for injection")
+	}
+	var rawCandidates []string
+	for _, entry := range translatedEntries {
+		if strings.HasPrefix(entry.Path, "raw_") && strings.EqualFold(entry.Context, "MonoBehaviour") {
+			rawCandidates = append(rawCandidates, entry.ID)
+		}
+	}
+	if len(rawCandidates) > 0 {
+		return res, core.NewError("inject", fmt.Sprintf(
+			"%d translated Unity entries came from a raw-byte scan and have no verified typetree field identity; refusing to stage a partial patch. Recover the matching Unity typetree and re-extract before injection",
+			len(rawCandidates)))
+	}
+	if !reg.IsAvailable("py_UnityPy") {
+		return res, core.NewError("inject", "UnityPy Python package is not installed. Install it with: pip install UnityPy")
+	}
 	workDir, err := proj.EnsureWorkingDir()
 	if err != nil {
 		return res, err
 	}
 
-	translatedEntries := proj.FindTranslated()
-	if len(translatedEntries) == 0 {
-		res.Warnings = append(res.Warnings, "No translated entries found")
-		return res, nil
-	}
-
-	if !reg.IsAvailable("py_UnityPy") {
-		return res, core.NewError("inject", "UnityPy Python package is not installed. Install it with: pip install UnityPy")
-	}
-
-	// Process Persian text for each translated entry.
-	processed := make(map[string]string)
-	for _, e := range translatedEntries {
-		tr := e.Translation
-		if opts.Reshape || opts.BidiReorder || opts.FixYeh || opts.PersianDigits {
-			tr = persian.Process(tr, persian.Options{
-				Reshape:        opts.Reshape,
-				BidiReorder:    opts.BidiReorder,
-				FixYeh:         opts.FixYeh,
-				PersianDigits:  opts.PersianDigits,
-				ConvertPunct:   opts.ConvertPunct,
-				DropDiacritics: opts.DropDiacritics,
-			})
-		}
-		processed[e.Source] = tr
-	}
-	res.StringCount = len(processed)
-
-	// Backup target files.
-	backupMgr := backup.New(info.GameRoot, filepath.Join(filepath.Dir(workDir), "backup"))
-	for _, file := range proj.ExtractedFiles {
-		if _, _, err := backupMgr.BackupFile(file); err != nil {
-			res.Errors = append(res.Errors, err.Error())
-		} else {
-			res.ModifiedFiles = append(res.ModifiedFiles, file)
-		}
-	}
-
 	// Write processed entries to translated.json for inject.py.
 	outJson := filepath.Join(workDir, "translated.json")
-	var toInject []core.StringEntry
+	toInject := make([]core.StringEntry, 0, len(translatedEntries))
 	for _, e := range translatedEntries {
-		e.Translation = processed[e.Source]
+		e.Translation = processPersianTranslation(e.Translation, opts)
 		toInject = append(toInject, e)
 	}
 	data, err := json.Marshal(toInject)
@@ -220,10 +209,22 @@ func (i *UnityInjector) Inject(ctx context.Context, info *core.GameInfo, proj *c
 		return res, nil
 	}
 	if scriptRes.ExitCode != 0 {
-		res.Errors = append(res.Errors, scriptExitError("inject", scriptRes.ExitCode, scriptRes.Output).Error())
-		return res, nil
+		return res, scriptExitError("inject", scriptRes.ExitCode, scriptRes.Output)
 	}
-
+	if scriptRes.Summary.Errors > 0 || scriptRes.Summary.NotFound > 0 {
+		return res, fmt.Errorf("Unity injection was incomplete: injected=%d expected=%d, not_found=%d, skipped_no_typetree=%d, errors=%d",
+			scriptRes.Summary.Injected, len(translatedEntries), scriptRes.Summary.NotFound,
+			scriptRes.Summary.SkippedNoTypeTree, scriptRes.Summary.Errors)
+	}
+	if scriptRes.Summary.Injected != len(translatedEntries) || scriptRes.Summary.FilesModified == 0 {
+		return res, fmt.Errorf("Unity injection produced no complete output: injected=%d expected=%d files=%d",
+			scriptRes.Summary.Injected, len(translatedEntries), scriptRes.Summary.FilesModified)
+	}
+	res.StringCount = scriptRes.Summary.Injected
+	res.ModifiedFiles, err = stageUnityOutputs(workDir, proj, scriptRes.Summary.ModifiedFiles)
+	if err != nil {
+		return res, err
+	}
 	log.Info("Unity injection completed", "reconstructed", scriptRes.Summary.Reconstructed, "output", firstLines(scriptRes.Output, 5))
 	return res, nil
 }
@@ -255,34 +256,9 @@ func (i *UnrealInjector) Inject(ctx context.Context, info *core.GameInfo, proj *
 
 	translatedEntries := proj.FindTranslated()
 	if len(translatedEntries) == 0 {
-		return res, nil
+		return res, core.NewError("inject", "no translated entries are ready for injection")
 	}
-
-	// Build a source→processed-translation map for Persian shaping.
-	processed := make(map[string]string)
-	for _, e := range translatedEntries {
-		tr := e.Translation
-		if opts.Reshape || opts.BidiReorder || opts.FixYeh || opts.PersianDigits {
-			tr = persian.Process(tr, persian.Options{
-				Reshape:        opts.Reshape,
-				BidiReorder:    opts.BidiReorder,
-				FixYeh:         opts.FixYeh,
-				PersianDigits:  opts.PersianDigits,
-				ConvertPunct:   opts.ConvertPunct,
-				DropDiacritics: opts.DropDiacritics,
-			})
-		}
-		processed[e.Source] = tr
-	}
-	res.StringCount = len(processed)
-
-	// Backup target files.
-	backupMgr := backup.New(info.GameRoot, filepath.Join(filepath.Dir(workDir), "backup"))
-	for _, file := range proj.ExtractedFiles {
-		if _, _, err := backupMgr.BackupFile(file); err == nil {
-			res.ModifiedFiles = append(res.ModifiedFiles, file)
-		}
-	}
+	res.StringCount = len(translatedEntries)
 
 	// Group translated entries by their source file so we can build one CSV
 	// per .locres (key,translation).
@@ -292,36 +268,55 @@ func (i *UnrealInjector) Inject(ctx context.Context, info *core.GameInfo, proj *
 	}
 
 	for file, entries := range byFile {
+		relFile, err := cleanGameRelativePath(file)
+		if err != nil {
+			return res, fmt.Errorf("invalid Unreal localization path %q: %w", file, err)
+		}
 		// Build the translations CSV (columns: key,translation).
 		var rows [][]string
 		rows = append(rows, []string{"key", "translation"})
 		for _, e := range entries {
-			rows = append(rows, []string{e.Path, processed[e.Source]})
+			rows = append(rows, []string{e.Path, processPersianTranslation(e.Translation, opts)})
 		}
-		outCsv := filepath.Join(workDir, filepath.Base(file)+".translations.csv")
+		csvPath, err := stagedPath(workDir, "inputs", relFile+".translations.csv")
+		if err != nil {
+			return res, err
+		}
+		if err := os.MkdirAll(filepath.Dir(csvPath), 0o755); err != nil {
+			return res, fmt.Errorf("create translation input directory: %w", err)
+		}
+		outCsv := csvPath
 		if err := writeCSV(outCsv, rows); err != nil {
-			res.Errors = append(res.Errors, "failed to write CSV for "+file+": "+err.Error())
-			continue
+			return res, fmt.Errorf("write CSV for %s: %w", file, err)
 		}
 
 		// Locate the original .locres in the game tree.
-		locresPath := file
-		if !filepath.IsAbs(locresPath) {
-			locresPath = filepath.Join(info.GameRoot, file)
+		locresPath, err := gameFilePath(info.GameRoot, relFile)
+		if err != nil {
+			return res, err
 		}
 		if !scanner.FileExists(locresPath) {
-			res.Errors = append(res.Errors, "locres not found: "+file)
-			continue
+			return res, fmt.Errorf("locres not found: %s", file)
 		}
 
-		outLocres := filepath.Join(workDir, filepath.Base(file))
+		outLocres, err := stagedPath(workDir, "out", relFile)
+		if err != nil {
+			return res, err
+		}
+		if err := os.MkdirAll(filepath.Dir(outLocres), 0o755); err != nil {
+			return res, fmt.Errorf("create staged localization directory: %w", err)
+		}
 		out, err := tools.RunSilent(ctx, workDir, fftools, "locres", "import", locresPath, outCsv, "-o", outLocres)
 		if err != nil {
-			res.Errors = append(res.Errors, "locres import failed for "+file+": "+firstLines(out, 5))
-			continue
+			return res, fmt.Errorf("locres import failed for %s: %s", file, firstLines(out, 5))
 		}
+		if !fileExists(outLocres) {
+			return res, fmt.Errorf("locres import did not create staged output for %s", file)
+		}
+		res.ModifiedFiles = append(res.ModifiedFiles, filepath.ToSlash(relFile))
 	}
 
+	sort.Strings(res.ModifiedFiles)
 	return res, nil
 }
 
@@ -332,12 +327,14 @@ type GodotInjector struct{}
 func (i *GodotInjector) SupportedEngine() string { return "godot" }
 func (i *GodotInjector) Capabilities() core.InjectorCaps {
 	return core.InjectorCaps{
-		TextInjection: false,
+		TextInjection:     true,
+		NeedsExternalTool: true,
+		ToolName:          "fftools",
 	}
 }
 
-func (*GodotInjector) Inject(context.Context, *core.GameInfo, *core.Project, core.ToolRegistry, core.PersianOptions) (*core.InjectionResult, error) {
-	return nil, core.NewError("inject", "Godot translation injection is not implemented; project files were not modified")
+func (i *GodotInjector) Inject(ctx context.Context, info *core.GameInfo, proj *core.Project, reg core.ToolRegistry, opts core.PersianOptions) (*core.InjectionResult, error) {
+	return injectGodotTranslations(ctx, info, proj, reg, opts)
 }
 
 // ── Generic ─────────────────────────────────────────────────────────
@@ -354,90 +351,236 @@ func (i *GenericInjector) Capabilities() core.InjectorCaps {
 
 func (i *GenericInjector) Inject(ctx context.Context, info *core.GameInfo, proj *core.Project, reg core.ToolRegistry, opts core.PersianOptions) (*core.InjectionResult, error) {
 	res := &core.InjectionResult{}
-
+	translatedEntries := proj.FindTranslated()
+	if len(translatedEntries) == 0 {
+		return res, core.NewError("inject", "no translated entries are ready for injection")
+	}
 	workDir, err := proj.EnsureWorkingDir()
 	if err != nil {
 		return res, err
 	}
-	backupMgr := backup.New(info.GameRoot, filepath.Join(filepath.Dir(workDir), "backup"))
-
-	translatedEntries := proj.FindTranslated()
 	res.StringCount = len(translatedEntries)
 
-	// Create backup for all extracted text files.
+	// Work only on staged copies; the patch installer is responsible for
+	// creating a backup when the user explicitly applies the patch.
 	for _, file := range proj.ExtractedFiles {
-		if _, _, err := backupMgr.BackupFile(file); err == nil {
-			res.ModifiedFiles = append(res.ModifiedFiles, file)
+		relFile, err := cleanGameRelativePath(file)
+		if err != nil {
+			return res, fmt.Errorf("invalid extracted file path %q: %w", file, err)
 		}
-	}
-
-	// Replace text line-by-line in generic text files.
-	for _, file := range proj.ExtractedFiles {
-		absPath := file
-		if !filepath.IsAbs(absPath) {
-			absPath = filepath.Join(info.GameRoot, file)
+		absPath, err := gameFilePath(info.GameRoot, relFile)
+		if err != nil {
+			return res, err
 		}
 		if !scanner.FileExists(absPath) {
-			continue
+			return res, fmt.Errorf("extracted source file is missing: %s", relFile)
 		}
-		if err := injectIntoTextFile(absPath, proj, info.GameRoot, opts); err != nil {
-			res.Errors = append(res.Errors, err.Error())
+		outPath, err := stagedPath(workDir, "out", relFile)
+		if err != nil {
+			return res, err
+		}
+		changed, err := injectIntoTextFile(absPath, outPath, relFile, translatedEntries, opts)
+		if err != nil {
+			return res, fmt.Errorf("inject %s: %w", relFile, err)
+		}
+		if changed {
+			res.ModifiedFiles = append(res.ModifiedFiles, filepath.ToSlash(relFile))
 		}
 	}
-
+	if len(res.ModifiedFiles) == 0 {
+		return res, core.NewError("inject", "no staged files contained translated keys")
+	}
+	sort.Strings(res.ModifiedFiles)
 	return res, nil
 }
 
 // injectIntoTextFile applies translations to a generic text/ini file by
 // matching entry.Path (the key before '=') and replacing the value with the
-// Persian-processed translation.
-func injectIntoTextFile(path string, proj *core.Project, root string, opts core.PersianOptions) error {
-	data, err := os.ReadFile(path)
+// Persian-processed translation. It reads the original and writes only to the
+// caller-provided staged output path.
+func injectIntoTextFile(sourcePath, outputPath, relPath string, entries []core.StringEntry, opts core.PersianOptions) (bool, error) {
+	data, err := os.ReadFile(sourcePath)
 	if err != nil {
-		return err
+		return false, err
 	}
-	relPath, _ := filepath.Rel(root, path)
+	if !utf8.Valid(data) {
+		return false, fmt.Errorf("unsupported non-UTF-8 text encoding")
+	}
 
 	// Build a key→translation map for this file.
 	replacements := make(map[string]string)
-	for _, e := range proj.FindTranslated() {
-		if e.File != relPath {
+	for _, e := range entries {
+		entryPath, err := cleanGameRelativePath(e.File)
+		if err != nil || !strings.EqualFold(filepath.ToSlash(entryPath), filepath.ToSlash(relPath)) {
 			continue
 		}
-		tr := e.Translation
-		if opts.Reshape || opts.BidiReorder || opts.FixYeh || opts.PersianDigits {
-			tr = persian.Process(tr, persian.Options{
-				Reshape:        opts.Reshape,
-				BidiReorder:    opts.BidiReorder,
-				FixYeh:         opts.FixYeh,
-				PersianDigits:  opts.PersianDigits,
-				ConvertPunct:   opts.ConvertPunct,
-				DropDiacritics: opts.DropDiacritics,
-			})
+		translation := processPersianTranslation(e.Translation, opts)
+		if old, exists := replacements[e.Path]; exists && old != translation {
+			return false, fmt.Errorf("multiple translations target key %q", e.Path)
 		}
-		replacements[e.Path] = tr
+		replacements[e.Path] = translation
 	}
 	if len(replacements) == 0 {
-		return nil
+		return false, nil
 	}
 
 	lines := strings.Split(string(data), "\n")
+	changed := false
+	seenKeys := make(map[string]int, len(replacements))
 	for i, raw := range lines {
-		line := strings.TrimSpace(raw)
-		if !strings.Contains(line, "=") {
+		content := raw
+		newline := ""
+		if strings.HasSuffix(content, "\r") {
+			content = strings.TrimSuffix(content, "\r")
+			newline = "\r"
+		}
+		separator := strings.IndexByte(content, '=')
+		if separator < 0 {
 			continue
 		}
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		key := strings.TrimSpace(parts[0])
-		if tr, ok := replacements[key]; ok {
-			// Preserve leading whitespace of the original line.
-			lead := raw[:len(raw)-len(strings.TrimLeft(raw, " \t"))]
-			lines[i] = lead + key + "=" + tr
+		key := strings.TrimSpace(content[:separator])
+		if translation, ok := replacements[key]; ok {
+			seenKeys[key]++
+			if seenKeys[key] > 1 {
+				return false, fmt.Errorf("translated key %q occurs more than once", key)
+			}
+			value := content[separator+1:]
+			leading := value[:len(value)-len(strings.TrimLeft(value, " \t"))]
+			trailing := value[len(strings.TrimRight(value, " \t")):]
+			lines[i] = content[:separator+1] + leading + translation + trailing + newline
+			changed = true
 		}
 	}
+	keys := make([]string, 0, len(replacements))
+	for key := range replacements {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if seenKeys[key] == 0 {
+			return false, fmt.Errorf("translated key %q was not found in source file", key)
+		}
+	}
+	if !changed {
+		return false, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
+		return false, err
+	}
+	if err := os.WriteFile(outputPath, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
+}
 
-	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0644)
+func processPersianTranslation(text string, opts core.PersianOptions) string {
+	if !(opts.Reshape || opts.BidiReorder || opts.FixYeh || opts.PersianDigits || opts.ConvertPunct || opts.DropDiacritics) {
+		return text
+	}
+	return persian.Process(text, persian.Options{
+		Reshape:        opts.Reshape,
+		BidiReorder:    opts.BidiReorder,
+		FixYeh:         opts.FixYeh,
+		PersianDigits:  opts.PersianDigits,
+		ConvertPunct:   opts.ConvertPunct,
+		DropDiacritics: opts.DropDiacritics,
+	})
+}
+
+func cleanGameRelativePath(name string) (string, error) {
+	name = strings.ReplaceAll(name, "\\", "/")
+	if name == "" || strings.ContainsRune(name, 0) || path.IsAbs(name) {
+		return "", fmt.Errorf("path must be relative")
+	}
+	clean := path.Clean(name)
+	first := strings.SplitN(clean, "/", 2)[0]
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.Contains(first, ":") {
+		return "", fmt.Errorf("path escapes the game directory")
+	}
+	return filepath.FromSlash(clean), nil
+}
+
+func gameFilePath(gameRoot, relPath string) (string, error) {
+	rel, err := cleanGameRelativePath(relPath)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(gameRoot, rel), nil
+}
+
+func stagedPath(workDir, area, relPath string) (string, error) {
+	rel, err := cleanGameRelativePath(relPath)
+	if err != nil {
+		return "", err
+	}
+	root, err := filepath.Abs(filepath.Join(workDir, area))
+	if err != nil {
+		return "", err
+	}
+	output := filepath.Join(root, rel)
+	relOutput, err := filepath.Rel(root, output)
+	if err != nil || relOutput == ".." || strings.HasPrefix(relOutput, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("staged output escapes its directory")
+	}
+	return output, nil
+}
+
+func stageUnityOutputs(workDir string, proj *core.Project, modified []string) ([]string, error) {
+	if len(modified) == 0 {
+		return nil, fmt.Errorf("Unity injector returned no modified asset paths")
+	}
+	byName := make(map[string]string, len(proj.ExtractedFiles))
+	for _, file := range proj.ExtractedFiles {
+		rel, err := cleanGameRelativePath(file)
+		if err != nil {
+			return nil, fmt.Errorf("invalid extracted Unity asset path %q: %w", file, err)
+		}
+		name := strings.ToLower(filepath.Base(rel))
+		if previous, exists := byName[name]; exists && previous != rel {
+			return nil, fmt.Errorf("ambiguous Unity asset basename %q maps to both %q and %q", name, previous, rel)
+		}
+		byName[name] = rel
+	}
+	result := make([]string, 0, len(modified))
+	seen := make(map[string]bool, len(modified))
+	for _, assetName := range modified {
+		assetName = filepath.Base(filepath.Clean(strings.ReplaceAll(assetName, "\\", "/")))
+		rel, ok := byName[strings.ToLower(assetName)]
+		if !ok {
+			return nil, fmt.Errorf("Unity modified asset %q is not present in the extracted project", assetName)
+		}
+		source, err := stagedPath(workDir, "out", assetName)
+		if err != nil {
+			return nil, err
+		}
+		target, err := stagedPath(workDir, "out", rel)
+		if err != nil {
+			return nil, err
+		}
+		if !fileExists(target) {
+			return nil, fmt.Errorf("Unity staged output is missing: %s", source)
+		}
+		if !strings.EqualFold(filepath.Clean(source), filepath.Clean(target)) {
+			if fileExists(target) {
+				return nil, fmt.Errorf("multiple Unity outputs map to %s", rel)
+			}
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return nil, err
+			}
+			if err := os.Rename(source, target); err != nil {
+				return nil, fmt.Errorf("move Unity output into game-relative staging path: %w", err)
+			}
+		}
+		if !seen[rel] {
+			seen[rel] = true
+			result = append(result, filepath.ToSlash(rel))
+		}
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func fileExists(name string) bool {
+	info, err := os.Stat(name)
+	return err == nil && !info.IsDir()
 }
