@@ -15,7 +15,7 @@ import (
 
 type UnityDetector struct{}
 
-func (d *UnityDetector) Name() string { return "unity" }
+func (d *UnityDetector) Name() string  { return "unity" }
 func (d *UnityDetector) Priority() int { return 100 }
 
 func (d *UnityDetector) Detect(gameDir string) (*core.DetectionResult, error) {
@@ -23,7 +23,7 @@ func (d *UnityDetector) Detect(gameDir string) (*core.DetectionResult, error) {
 		Engine:   "unity",
 		Metadata: make(map[string]string),
 	}
-	
+
 	// Check for UnityPlayer.dll in root
 	if scanner.FileExists(filepath.Join(gameDir, "UnityPlayer.dll")) {
 		res.Confidence = 0.95
@@ -74,8 +74,8 @@ func (d *UnityDetector) Detect(gameDir string) (*core.DetectionResult, error) {
 			res.Version = version
 		}
 	}
-	
-	exePath, gameName := scanner.FindGameExe(gameDir, []string{".exe"})
+
+	exePath, gameName := findGameExeSkippingLaunchers(gameDir, []string{".exe"})
 	res.GameExe = exePath
 	res.GameName = gameName
 
@@ -141,7 +141,7 @@ func readUnityVersion(dataDir string) string {
 
 type UnrealDetector struct{}
 
-func (d *UnrealDetector) Name() string { return "unreal" }
+func (d *UnrealDetector) Name() string  { return "unreal" }
 func (d *UnrealDetector) Priority() int { return 90 }
 
 func (d *UnrealDetector) Detect(gameDir string) (*core.DetectionResult, error) {
@@ -175,14 +175,24 @@ func (d *UnrealDetector) Detect(gameDir string) (*core.DetectionResult, error) {
 		score += 3
 		res.Evidence = append(res.Evidence, fmt.Sprintf("Found %d .pak files", len(pakFiles)))
 	}
-	if hasShippingExe { score += 2 }
-	if hasUasset { score += 2 }
-	if hasContentDir { score += 1 }
-	if hasEngineDir { score += 1 }
+	if hasShippingExe {
+		score += 2
+	}
+	if hasUasset {
+		score += 2
+	}
+	if hasContentDir {
+		score += 1
+	}
+	if hasEngineDir {
+		score += 1
+	}
 
 	if score >= 3 {
 		res.Confidence = float64(score) / 7.0
-		if res.Confidence > 1.0 { res.Confidence = 1.0 }
+		if res.Confidence > 1.0 {
+			res.Confidence = 1.0
+		}
 
 		res.Version = detectUnrealVersion(gameDir, pakFiles)
 
@@ -193,8 +203,8 @@ func (d *UnrealDetector) Detect(gameDir string) (*core.DetectionResult, error) {
 			res.Evidence = append(res.Evidence, fmt.Sprintf("Found %d .locres files", len(locresFiles)))
 			res.DataPaths = append(res.DataPaths, filepath.Dir(locresFiles[0]))
 		}
-		
-		exePath, gameName := scanner.FindGameExe(gameDir, []string{"-Win64-Shipping.exe", ".exe"})
+
+		exePath, gameName := findGameExeSkippingLaunchers(gameDir, []string{"-Win64-Shipping.exe", ".exe"})
 		res.GameExe = exePath
 		res.GameName = gameName
 
@@ -239,11 +249,98 @@ func detectUnrealVersion(root string, pakFiles []string) string {
 	return ""
 }
 
+// ── Unreal Engine 3 ─────────────────────────────────────────────────
+
+// UE3Detector detects Unreal Engine 3 games using markers that are
+// distinct from UE4/UE5:
+//   - Coalesced.* files (localization config bundles, e.g. Coalesced.INT)
+//   - .upk files (UE3 package files)
+//   - .xxx files (MK-specific compressed asset extension)
+//
+// UE4/UE5 games use .pak/.uasset/.umap and .locres, none of which are UE3
+// markers, so this detector will not false-positive on them.
+type UE3Detector struct{}
+
+func (d *UE3Detector) Name() string  { return "ue3" }
+func (d *UE3Detector) Priority() int { return 95 } // higher than Unreal (90)
+
+func (d *UE3Detector) Detect(gameDir string) (*core.DetectionResult, error) {
+	// Coalesced.* files (e.g. Coalesced.INT, Coalesced.ENG, Coalesced.ini)
+	coalescedFiles := scanner.WalkDir(gameDir, 4, func(p string) bool {
+		base := strings.ToLower(filepath.Base(p))
+		return strings.HasPrefix(base, "coalesced.")
+	})
+
+	// .upk files (UE3 Unreal Package)
+	upkFiles := scanner.WalkDir(gameDir, 4, func(p string) bool {
+		return strings.EqualFold(filepath.Ext(p), ".upk")
+	})
+
+	// .xxx files (MK-specific compressed asset extension used by MK10)
+	xxxFiles := scanner.WalkDir(gameDir, 4, func(p string) bool {
+		return strings.EqualFold(filepath.Ext(p), ".xxx")
+	})
+
+	// Guard: if the game has .pak files (UE4/UE5 marker) and no UE3 markers,
+	// it is NOT UE3 — bail out to avoid false positives.
+	hasPak := scanner.WalkDir(gameDir, 3, func(p string) bool {
+		return strings.EqualFold(filepath.Ext(p), ".pak")
+	}) != nil
+	if hasPak && len(coalescedFiles) == 0 && len(upkFiles) == 0 {
+		return nil, nil
+	}
+
+	score := 0
+	res := &core.DetectionResult{
+		Engine:   "ue3",
+		Metadata: make(map[string]string),
+	}
+
+	if len(coalescedFiles) > 0 {
+		score += 3
+		res.Evidence = append(res.Evidence, fmt.Sprintf("Found %d Coalesced.* files", len(coalescedFiles)))
+	}
+	if len(upkFiles) > 0 {
+		score += 2
+		res.Evidence = append(res.Evidence, fmt.Sprintf("Found %d .upk files", len(upkFiles)))
+	}
+	if len(xxxFiles) > 0 {
+		score += 2
+		res.Evidence = append(res.Evidence, fmt.Sprintf("Found %d .xxx files (MK-style assets)", len(xxxFiles)))
+	}
+
+	// Need at least one strong UE3 marker
+	if score < 2 {
+		return nil, nil
+	}
+
+	res.Confidence = float64(score) / 7.0
+	if res.Confidence > 1.0 {
+		res.Confidence = 1.0
+	}
+	res.Version = "UE3"
+
+	// UE3 does NOT use .locres (that's UE4/UE5)
+	locresFiles := scanner.WalkDir(gameDir, 5, func(p string) bool {
+		return strings.EqualFold(filepath.Ext(p), ".locres")
+	})
+	if len(locresFiles) > 0 {
+		// If .locres exists alongside UE3 markers, note it but don't change engine
+		res.Evidence = append(res.Evidence, fmt.Sprintf("Note: %d .locres files also present (may be hybrid)", len(locresFiles)))
+	}
+
+	exePath, gameName := findGameExeSkippingLaunchers(gameDir, []string{".exe"})
+	res.GameExe = exePath
+	res.GameName = gameName
+
+	return res, nil
+}
+
 // ── Godot ───────────────────────────────────────────────────────────
 
 type GodotDetector struct{}
 
-func (d *GodotDetector) Name() string { return "godot" }
+func (d *GodotDetector) Name() string  { return "godot" }
 func (d *GodotDetector) Priority() int { return 90 }
 
 func (d *GodotDetector) Detect(gameDir string) (*core.DetectionResult, error) {
@@ -278,10 +375,18 @@ func (d *GodotDetector) Detect(gameDir string) (*core.DetectionResult, error) {
 		}
 
 		if res.Version == "" && len(pckFiles) > 0 {
-			res.Version = readPCKVersion(pckFiles[0])
+			// Header-byte verification: read only magic+version bytes (read-only).
+			magic, packVersion, err := readPCKHeader(pckFiles[0])
+			if err == nil && magic == "GDPC" {
+				res.Version = pckVersionToString(packVersion)
+				res.Evidence = append(res.Evidence,
+					fmt.Sprintf("PCK header verified: magic=%s pack_version=%d", magic, packVersion))
+				res.Metadata["pck_magic"] = magic
+				res.Metadata["pck_pack_version"] = fmt.Sprintf("%d", packVersion)
+			}
 		}
-		
-		exePath, gameName := scanner.FindGameExe(gameDir, []string{".exe"})
+
+		exePath, gameName := findGameExeSkippingLaunchers(gameDir, []string{".exe"})
 		res.GameExe = exePath
 		res.GameName = gameName
 
@@ -291,20 +396,60 @@ func (d *GodotDetector) Detect(gameDir string) (*core.DetectionResult, error) {
 	return nil, nil
 }
 
+// readPCKVersion reads only the magic + version bytes from a .pck header
+// (read-only, never writes). PCK format:
+//
+//	[0:4]  magic  = "GDPC"
+//	[4:8]  pack version (uint32 LE)
+//
+// Version mapping:
+//
+//	v1 → Godot 2.x
+//	v2 → Godot 3.x & 4.0–4.2
+//	v3 → Godot 4.3+
 func readPCKVersion(pckPath string) string {
-	data, err := os.ReadFile(pckPath)
-	if err != nil || len(data) < 8 {
+	magic, packVersion, err := readPCKHeader(pckPath)
+	if err != nil {
 		return ""
 	}
-	if string(data[:4]) == "GDPC" {
-		packVersion := binary.LittleEndian.Uint32(data[4:8])
-		switch packVersion {
-		case 1: return "3.x"
-		case 2: return "4.x"
-		default: return fmt.Sprintf("pack_ver=%d", packVersion)
-		}
+	if magic != "GDPC" {
+		return ""
 	}
-	return ""
+	return pckVersionToString(packVersion)
+}
+
+// pckVersionToString maps a PCK pack-version integer to a human-readable
+// Godot version string.
+func pckVersionToString(packVersion uint32) string {
+	switch packVersion {
+	case 1:
+		return "2.x"
+	case 2:
+		return "3.x / 4.0-4.2"
+	case 3:
+		return "4.3+"
+	default:
+		return fmt.Sprintf("pack_ver=%d", packVersion)
+	}
+}
+
+// readPCKHeader opens the .pck file read-only, reads the first 8 bytes
+// (magic + version), and closes the file immediately. It never writes.
+func readPCKHeader(pckPath string) (magic string, packVersion uint32, err error) {
+	f, err := os.Open(pckPath)
+	if err != nil {
+		return "", 0, err
+	}
+	defer f.Close()
+
+	var hdr [8]byte
+	n, err := f.Read(hdr[:])
+	if err != nil || n < 8 {
+		return "", 0, fmt.Errorf("short read: %d bytes", n)
+	}
+	magic = string(hdr[:4])
+	packVersion = binary.LittleEndian.Uint32(hdr[4:8])
+	return magic, packVersion, nil
 }
 
 // ── Generic ─────────────────────────────────────────────────────────
@@ -312,7 +457,7 @@ func readPCKVersion(pckPath string) string {
 // GenericDetector acts as a fallback for standard files
 type GenericDetector struct{}
 
-func (d *GenericDetector) Name() string { return "generic" }
+func (d *GenericDetector) Name() string  { return "generic" }
 func (d *GenericDetector) Priority() int { return 0 }
 
 func (d *GenericDetector) Detect(gameDir string) (*core.DetectionResult, error) {
@@ -323,10 +468,10 @@ func (d *GenericDetector) Detect(gameDir string) (*core.DetectionResult, error) 
 		Evidence:   []string{"No specific engine matched, falling back to generic."},
 		Metadata:   make(map[string]string),
 	}
-	
-	exePath, gameName := scanner.FindGameExe(gameDir, []string{".exe"})
+
+	exePath, gameName := findGameExeSkippingLaunchers(gameDir, []string{".exe"})
 	res.GameExe = exePath
 	res.GameName = gameName
-	
+
 	return res, nil
 }

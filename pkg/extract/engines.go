@@ -1,17 +1,153 @@
 package extract
 
 import (
-	"bufio"
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"farsiforge/pkg/core"
 	"farsiforge/pkg/scanner"
+	"farsiforge/pkg/tools"
 )
+
+// ── Shared script helpers ────────────────────────────────────────────
+
+// scriptSummary is the tolerant parse of the trailing "SUMMARY: {json}"
+// line emitted by extract.py / inject.py. Unknown fields are ignored and
+// every field is optional.
+type scriptSummary struct {
+	Reconstructed int            `json:"reconstructed,omitempty"`
+	Targets       map[string]int `json:"targets,omitempty"`
+	Files         int            `json:"files,omitempty"`
+	Strings       int            `json:"strings,omitempty"`
+}
+
+// scriptResult holds the outcome of running an embedded Python script.
+type scriptResult struct {
+	Output   string
+	Summary  scriptSummary
+	ExitCode int
+}
+
+// toolsRegistry extracts the concrete *tools.Registry from the
+// core.ToolRegistry interface so we can access RootDir / FFTools. It returns
+// nil when the registry is a mock (tests).
+func toolsRegistry(reg core.ToolRegistry) *tools.Registry {
+	if tr, ok := reg.(*tools.Registry); ok {
+		return tr
+	}
+	return nil
+}
+
+// runPythonScript writes the embedded Python script (scriptName) into workDir,
+// then runs `python <script> <gameDir> <workDir> [toolsDir]` silently via
+// pkg/tools.RunSilent. It parses the trailing SUMMARY line and maps the
+// process exit code into scriptResult.ExitCode.
+func runPythonScript(ctx context.Context, reg core.ToolRegistry, op, scriptName, gameDir, workDir string) (*scriptResult, error) {
+	py := reg.GetPython()
+	if py == "" {
+		return nil, core.NewError(op, "Python is required but was not found")
+	}
+
+	scriptPath, err := tools.WriteScript(scriptName, workDir)
+	if err != nil {
+		return nil, core.NewError(op, "failed to write embedded script "+scriptName+": "+err.Error())
+	}
+
+	args := []string{scriptPath, gameDir, workDir}
+	if tr := toolsRegistry(reg); tr != nil && tr.RootDir != "" {
+		args = append(args, tr.RootDir)
+	}
+
+	out, runErr := tools.RunSilent(ctx, workDir, py, args...)
+	res := &scriptResult{Output: out}
+	if runErr != nil {
+		if ee, ok := runErr.(*exec.ExitError); ok {
+			res.ExitCode = ee.ExitCode()
+		} else {
+			return res, core.NewError(op, "failed to run "+scriptName+": "+runErr.Error())
+		}
+	}
+	res.Summary = parseSummary(out)
+	return res, nil
+}
+
+// parseSummary scans the output backwards for the last line starting with
+// "SUMMARY: " and unmarshals the JSON that follows. Missing or malformed
+// SUMMARY lines yield a zero-value scriptSummary (no error).
+func parseSummary(output string) scriptSummary {
+	var s scriptSummary
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(line, "SUMMARY: ") {
+			jsonPart := strings.TrimPrefix(line, "SUMMARY: ")
+			_ = json.Unmarshal([]byte(jsonPart), &s) // tolerant: ignore error
+			break
+		}
+	}
+	return s
+}
+
+// scriptExitError maps a Python script exit code to an actionable error.
+// op is the operation name ("extract" / "inject") for the error context.
+func scriptExitError(op string, exitCode int, output string) error {
+	switch exitCode {
+	case 0:
+		return nil
+	case 2:
+		return core.NewError(op, "UnityPy is not installed. Install it with: pip install UnityPy")
+	case 3:
+		return core.NewError(op, "game data not found at the specified path")
+	case 4:
+		return core.NewError(op, "script error: "+firstLines(output, 20))
+	default:
+		return core.NewError(op, "script failed (exit "+strconv.Itoa(exitCode)+"): "+firstLines(output, 20))
+	}
+}
+
+// firstLines returns up to n non-empty lines of s (for compact error messages).
+func firstLines(s string, n int) string {
+	var out []string
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		out = append(out, line)
+		if len(out) >= n {
+			break
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+// fftoolsPath returns the fftools.exe path from the registry, or "" if absent.
+func fftoolsPath(reg core.ToolRegistry) string {
+	if tr := toolsRegistry(reg); tr != nil {
+		return tr.FFTools
+	}
+	return reg.GetPath("fftools")
+}
+
+// readCSV reads a CSV file and returns its rows. Returns nil if the file
+// cannot be opened.
+func readCSV(path string) [][]string {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	r := csv.NewReader(f)
+	r.FieldsPerRecord = -1 // tolerate variable column counts
+	rows, _ := r.ReadAll()
+	return rows
+}
 
 // ── Unity ───────────────────────────────────────────────────────────
 
@@ -22,54 +158,52 @@ func (e *UnityExtractor) Capabilities() core.ExtractorCaps {
 	return core.ExtractorCaps{
 		TextExtraction:    true,
 		NeedsExternalTool: true,
-		ToolName:          "UnityPy",
+		ToolName:          "python",
 	}
 }
 
-func (e *UnityExtractor) Extract(ctx context.Context, info *core.GameInfo, proj *core.Project, tools core.ToolRegistry) error {
+func (e *UnityExtractor) Extract(ctx context.Context, info *core.GameInfo, proj *core.Project, reg core.ToolRegistry) error {
 	workDir, err := proj.EnsureWorkingDir()
 	if err != nil {
 		return err
 	}
 
-	python := tools.GetPython()
-	if python == "" {
-		return core.NewError("extract", "Python is required for Unity extraction but not found")
+	// UnityPy is a pip package; check the python-package availability flag.
+	if !reg.IsAvailable("py_UnityPy") {
+		return core.NewError("extract", "UnityPy Python package is not installed. Install it with: pip install UnityPy")
 	}
 
-	scriptPath := filepath.Join(tools.GetPath("UnityPy"), "extract.py")
-	if !scanner.FileExists(scriptPath) {
-		// Try to find it in the project
-		scriptPath = filepath.Join(filepath.Dir(proj.GameRoot), "Tools", "UnityPy", "extract.py")
+	res, err := runPythonScript(ctx, reg, "extract", "extract.py", info.GameRoot, workDir)
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		return scriptExitError("extract", res.ExitCode, res.Output)
 	}
 
-	// Just a mock of actual extraction for now
-	// In reality, this would run UnityPy and parse its output JSON
-	cmd := exec.CommandContext(ctx, python, scriptPath, info.GameRoot, workDir)
-	log.Debug("Running Unity extraction", "cmd", cmd.String())
-	
-	// Simulate extraction for Supermarket Together since script might not exist yet
-	proj.AddEntry(core.StringEntry{
-		Source: "Play",
-		File: "resources.assets",
-		Path: "TextAsset/UI_MainMenu",
-		Context: "UI",
-	})
-	proj.AddEntry(core.StringEntry{
-		Source: "Options",
-		File: "resources.assets",
-		Path: "TextAsset/UI_MainMenu",
-		Context: "UI",
-	})
-	proj.AddEntry(core.StringEntry{
-		Source: "Quit",
-		File: "resources.assets",
-		Path: "TextAsset/UI_MainMenu",
-		Context: "UI",
-	})
+	log.Debug("Unity extraction summary", "reconstructed", res.Summary.Reconstructed, "output", firstLines(res.Output, 5))
 
-	proj.ExtractedFiles = append(proj.ExtractedFiles, "resources.assets")
-	
+	// Read the extracted.json produced by extract.py in the work directory.
+	outJson := filepath.Join(workDir, "extracted.json")
+	data, err := os.ReadFile(outJson)
+	if err != nil {
+		return core.NewError("extract", "failed to read extracted strings: "+err.Error())
+	}
+
+	var entries []core.StringEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return core.NewError("extract", "failed to parse extracted strings: "+err.Error())
+	}
+
+	fileMap := make(map[string]bool)
+	for _, e := range entries {
+		proj.AddEntry(e)
+		if !fileMap[e.File] {
+			proj.ExtractedFiles = append(proj.ExtractedFiles, e.File)
+			fileMap[e.File] = true
+		}
+	}
+
 	return nil
 }
 
@@ -82,13 +216,223 @@ func (e *UnrealExtractor) Capabilities() core.ExtractorCaps {
 	return core.ExtractorCaps{
 		TextExtraction:    true,
 		NeedsExternalTool: true,
-		ToolName:          "UnrealLocres",
+		ToolName:          "fftools",
 	}
 }
 
-func (e *UnrealExtractor) Extract(ctx context.Context, info *core.GameInfo, proj *core.Project, tools core.ToolRegistry) error {
-	// Dummy implementation for now
+func (e *UnrealExtractor) Extract(ctx context.Context, info *core.GameInfo, proj *core.Project, reg core.ToolRegistry) error {
+	workDir, err := proj.EnsureWorkingDir()
+	if err != nil {
+		return err
+	}
+
+	// 1. Find loose .locres files (search a few levels under the game root).
+	locresFiles := scanner.WalkDir(info.GameRoot, 6, func(p string) bool {
+		return strings.ToLower(filepath.Ext(p)) == ".locres"
+	})
+
+	// 2. Export each loose .locres to CSV via fftools.
+	exportedAny := false
+	for _, f := range locresFiles {
+		if e.exportLocresFile(ctx, proj, reg, workDir, f, f) {
+			exportedAny = true
+		}
+	}
+
+	// 3. .pak archives: export .locres inside the pak and (fallback) scan
+	//    .uexp exports from text-bearing directories.
+	pakFiles := scanner.WalkDir(info.GameRoot, 6, func(p string) bool {
+		return strings.ToLower(filepath.Ext(p)) == ".pak"
+	})
+	if len(pakFiles) > 0 {
+		e.extractFromPak(ctx, info, proj, reg, workDir, pakFiles)
+	} else if !exportedAny {
+		log.Warn("No .locres files found. Ensure .pak files are unpacked first.")
+	}
+
 	return nil
+}
+
+// exportLocresFile exports a single .locres file to CSV via fftools and adds
+// the entries to the project. Returns true on success.
+func (e *UnrealExtractor) exportLocresFile(ctx context.Context, proj *core.Project, reg core.ToolRegistry, workDir, locresPath, displayPath string) bool {
+	fftools := fftoolsPath(reg)
+	if fftools == "" {
+		log.Warn("fftools.exe not found (required for Unreal .locres export)")
+		return false
+	}
+
+	relPath := displayPath
+	if relPath == locresPath {
+		relPath, _ = filepath.Rel(proj.GameRoot, locresPath)
+		if relPath == "" {
+			relPath = filepath.Base(locresPath)
+		}
+	}
+
+	outCsv := filepath.Join(workDir, filepath.Base(locresPath)+".csv")
+	out, err := tools.RunSilent(ctx, workDir, fftools, "locres", "export", locresPath, "-o", outCsv)
+	if err != nil {
+		log.Warn("Failed to export locres", "file", locresPath, "error", err, "output", firstLines(out, 5))
+		return false
+	}
+
+	rows := readCSV(outCsv)
+	count := 0
+	for i, row := range rows {
+		if i == 0 || len(row) < 2 {
+			continue // skip header / malformed rows
+		}
+		key, source := row[0], row[1]
+		if source == "" {
+			continue
+		}
+		proj.AddEntry(core.StringEntry{
+			Source:  source,
+			File:    relPath,
+			Path:    key,
+			Context: "Unreal",
+		})
+		count++
+	}
+	if count > 0 {
+		proj.ExtractedFiles = append(proj.ExtractedFiles, relPath)
+	}
+	return true
+}
+
+// repakPath returns the repak.exe path (UE4 .pak unpacker), or "" if absent.
+func repakPath(reg core.ToolRegistry) string {
+	if tr := toolsRegistry(reg); tr != nil {
+		for _, p := range []string{
+			filepath.Join(tr.RootDir, "repak", "repak.exe"),
+			filepath.Join(tr.RootDir, "repak.exe"),
+		} {
+			if scanner.FileExists(p) {
+				return p
+			}
+		}
+	}
+	return ""
+}
+
+// extractFromPak handles .pak archives:
+//
+//  1. .locres files inside the pak are read via `repak get` and exported
+//     through fftools (the real localization text — e.g. Game.locres).
+//  2. When the game hardcodes text in DataTable/Widget assets instead
+//     (no .locres), .uexp files from text-bearing directories are batch-
+//     unpacked with a single `repak unpack -i <dir>` per pak and scanned
+//     locally. Per-file `repak get` is avoided: on big paks (tens of
+//     thousands of .uexp) it takes hours.
+func (e *UnrealExtractor) extractFromPak(ctx context.Context, info *core.GameInfo, proj *core.Project, reg core.ToolRegistry, workDir string, pakFiles []string) {
+	repak := repakPath(reg)
+	if repak == "" {
+		log.Warn("repak.exe not found (required to read .pak files)")
+		return
+	}
+
+	for _, pak := range pakFiles {
+		listOut, err := tools.RunSilent(ctx, workDir, repak, "list", pak)
+		if err != nil {
+			log.Warn("Failed to list pak", "file", pak, "error", err, "output", firstLines(listOut, 5))
+			continue
+		}
+
+		var locresPaths, uexpPaths []string
+		for _, line := range strings.Split(listOut, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			switch strings.ToLower(filepath.Ext(line)) {
+			case ".locres":
+				locresPaths = append(locresPaths, line)
+			case ".uexp":
+				if isUETextPath(line) {
+					uexpPaths = append(uexpPaths, line)
+				}
+			}
+		}
+
+		// 1) .locres inside the pak — extract + export.
+		for _, lp := range locresPaths {
+			data, err := tools.RunSilent(ctx, workDir, repak, "get", pak, lp)
+			if err != nil {
+				log.Warn("Failed to read locres from pak", "file", lp, "error", err)
+				continue
+			}
+			local := filepath.Join(workDir, "locres_from_pak", sanitizePakName(lp))
+			if err := os.MkdirAll(filepath.Dir(local), 0o755); err != nil {
+				continue
+			}
+			if err := os.WriteFile(local, []byte(data), 0o644); err != nil {
+				log.Warn("Failed to write locres", "file", local, "error", err)
+				continue
+			}
+			e.exportLocresFile(ctx, proj, reg, workDir, local, lp)
+		}
+
+		// 2) .uexp fallback — batch unpack text dirs, then scan locally.
+		if len(uexpPaths) == 0 {
+			continue
+		}
+		if len(uexpPaths) > ueMaxUexp {
+			log.Warn("Too many .uexp files - truncating", "total", len(uexpPaths), "max", ueMaxUexp)
+			uexpPaths = uexpPaths[:ueMaxUexp]
+		}
+		dirs := make(map[string]bool)
+		for _, p := range uexpPaths {
+			idx := strings.LastIndex(p, "/")
+			if idx > 0 {
+				dirs[p[:idx]] = true
+			}
+		}
+		unpackDir := filepath.Join(workDir, "pak_"+strings.TrimSuffix(filepath.Base(pak), filepath.Ext(pak)))
+		args := []string{"unpack", pak, "-o", unpackDir, "-q"}
+		for d := range dirs {
+			args = append(args, "-i", d)
+		}
+		out, err := tools.RunSilent(ctx, workDir, repak, args...)
+		if err != nil {
+			log.Warn("Failed to unpack pak dirs", "file", pak, "error", err, "output", firstLines(out, 5))
+			continue
+		}
+
+		uexpFiles := scanner.WalkDir(unpackDir, 12, func(p string) bool {
+			return strings.ToLower(filepath.Ext(p)) == ".uexp"
+		})
+		for _, uexp := range uexpFiles {
+			data, err := os.ReadFile(uexp)
+			if err != nil {
+				continue
+			}
+			relPath, _ := filepath.Rel(unpackDir, uexp)
+			texts := extractUexpStrings(data)
+			for _, s := range texts {
+				proj.AddEntry(core.StringEntry{
+					Source:  s,
+					File:    filepath.ToSlash(relPath),
+					Context: "Unreal",
+				})
+			}
+			if len(texts) > 0 {
+				proj.ExtractedFiles = append(proj.ExtractedFiles, filepath.ToSlash(relPath))
+			}
+		}
+	}
+}
+
+// ueMaxUexp caps the number of .uexp files processed per pak to keep
+// extraction time bounded on huge paks.
+const ueMaxUexp = 8000
+
+// sanitizePakName converts a pak entry path into a safe file name.
+func sanitizePakName(p string) string {
+	s := strings.ReplaceAll(p, "/", "_")
+	s = strings.ReplaceAll(s, ":", "_")
+	s = strings.ReplaceAll(s, "\\", "_")
+	return s
 }
 
 // ── Godot ───────────────────────────────────────────────────────────
@@ -100,13 +444,155 @@ func (e *GodotExtractor) Capabilities() core.ExtractorCaps {
 	return core.ExtractorCaps{
 		TextExtraction:    true,
 		NeedsExternalTool: true,
-		ToolName:          "gdre_tools",
+		ToolName:          "fftools",
 	}
 }
 
-func (e *GodotExtractor) Extract(ctx context.Context, info *core.GameInfo, proj *core.Project, tools core.ToolRegistry) error {
-	// Dummy implementation for now
+func (e *GodotExtractor) Extract(ctx context.Context, info *core.GameInfo, proj *core.Project, reg core.ToolRegistry) error {
+	workDir, err := proj.EnsureWorkingDir()
+	if err != nil {
+		return err
+	}
+
+	// 1. Find .pck files.
+	pckFiles := scanner.WalkDir(info.GameRoot, 3, func(p string) bool {
+		return strings.ToLower(filepath.Ext(p)) == ".pck"
+	})
+	if len(pckFiles) == 0 {
+		log.Warn("No .pck file found for Godot game")
+		return nil
+	}
+
+	// 2. Preferred path: recover the project with gdre_tools (converts
+	//    binary .res/.scn/.gdc to text .tres/.tscn/.gd), then parse the text
+	//    files for strings. This recovers text that is hardcoded in scenes,
+	//    resources, and scripts (no .translation files present).
+	gdre := gdrePath(reg)
+	if gdre == "" {
+		log.Warn("gdre_tools.exe not found - falling back to pck extraction (may miss scene/script text)")
+		return e.extractPckOnly(ctx, info, proj, reg, workDir, pckFiles)
+	}
+
+	recDir := filepath.Join(workDir, "gdre_recovered")
+	_ = os.RemoveAll(recDir)
+	out, err := tools.RunSilent(ctx, workDir, gdre, "--headless", "--recover="+pckFiles[0], "--output="+recDir)
+	if err != nil {
+		log.Warn("gdre recovery failed", "error", err, "output", firstLines(out, 3))
+		return e.extractPckOnly(ctx, info, proj, reg, workDir, pckFiles)
+	}
+
+	// 3. Handle .translation files from the recovered project (same logic
+	//    as the pck-only path).
+	e.exportTranslationFiles(ctx, proj, reg, workDir, recDir)
+
+	// 4. Parse recovered text files (.tres/.gd/.tscn) for hardcoded strings.
+	textFiles := scanner.WalkDir(recDir, 12, func(p string) bool {
+		switch strings.ToLower(filepath.Ext(p)) {
+		case ".tres", ".gd", ".tscn":
+			return true
+		}
+		return false
+	})
+
+	for _, tf := range textFiles {
+		data, err := os.ReadFile(tf)
+		if err != nil {
+			continue
+		}
+		relPath, _ := filepath.Rel(recDir, tf)
+		texts := extractGodotTextStrings(data)
+		for _, s := range texts {
+			proj.AddEntry(core.StringEntry{
+				Source:  s,
+				File:    relPath,
+				Context: "Godot",
+			})
+		}
+		if len(texts) > 0 {
+			proj.ExtractedFiles = append(proj.ExtractedFiles, relPath)
+		}
+	}
+
 	return nil
+}
+
+// extractPckOnly is the fallback when gdre_tools is unavailable: extract the
+// .pck with fftools and export any .translation files found inside.
+func (e *GodotExtractor) extractPckOnly(ctx context.Context, info *core.GameInfo, proj *core.Project, reg core.ToolRegistry, workDir string, pckFiles []string) error {
+	fftools := fftoolsPath(reg)
+	if fftools == "" {
+		return core.NewError("extract", "fftools.exe not found (required for Godot .pck extraction)")
+	}
+
+	for _, pck := range pckFiles {
+		pckRel, _ := filepath.Rel(info.GameRoot, pck)
+		extractDir := filepath.Join(workDir, "pck_"+strings.TrimSuffix(filepath.Base(pck), filepath.Ext(pck)))
+		out, err := tools.RunSilent(ctx, workDir, fftools, "pck", "extract", pck, "-o", extractDir)
+		if err != nil {
+			log.Warn("Failed to extract pck", "file", pck, "error", err, "output", firstLines(out, 5))
+			continue
+		}
+		proj.ExtractedFiles = append(proj.ExtractedFiles, pckRel)
+
+		e.exportTranslationFiles(ctx, proj, reg, workDir, extractDir)
+	}
+
+	return nil
+}
+
+// exportTranslationFiles finds .translation files under dir, exports each to
+// CSV via fftools, and adds the entries to the project.
+func (e *GodotExtractor) exportTranslationFiles(ctx context.Context, proj *core.Project, reg core.ToolRegistry, workDir, dir string) {
+	fftools := fftoolsPath(reg)
+	if fftools == "" {
+		log.Warn("fftools.exe not found (cannot export .translation files)")
+		return
+	}
+
+	translationFiles := scanner.WalkDir(dir, 8, func(p string) bool {
+		return strings.ToLower(filepath.Ext(p)) == ".translation"
+	})
+
+	for _, tf := range translationFiles {
+		tfRel, _ := filepath.Rel(dir, tf)
+		outCsv := filepath.Join(workDir, filepath.Base(tf)+".csv")
+		out, err := tools.RunSilent(ctx, workDir, fftools, "translation", "export", tf, outCsv)
+		if err != nil {
+			// The translation command may not be deployed yet — degrade
+			// gracefully instead of crashing the whole extraction.
+			log.Warn("fftools translation export not available yet", "file", tf, "error", firstLines(out, 3))
+			continue
+		}
+
+		// Parse CSV into entries. Godot .translation CSV columns are
+		// typically: key, source (tolerant of extra columns).
+		rows := readCSV(outCsv)
+		for i, row := range rows {
+			if i == 0 || len(row) < 2 {
+				continue
+			}
+			key, source := row[0], row[1]
+			if source == "" {
+				continue
+			}
+			proj.AddEntry(core.StringEntry{
+				Source:  source,
+				File:    tfRel,
+				Path:    key,
+				Context: "Godot",
+			})
+		}
+		proj.ExtractedFiles = append(proj.ExtractedFiles, tfRel)
+	}
+}
+
+// gdrePath returns the gdre_tools.exe path from the registry, or "" if
+// absent.
+func gdrePath(reg core.ToolRegistry) string {
+	if tr := toolsRegistry(reg); tr != nil && tr.GDRETools != "" {
+		return tr.GDRETools
+	}
+	return reg.GetPath("gdre_tools")
 }
 
 // ── Generic ─────────────────────────────────────────────────────────
@@ -122,7 +608,7 @@ func (e *GenericExtractor) Capabilities() core.ExtractorCaps {
 }
 
 func (e *GenericExtractor) Extract(ctx context.Context, info *core.GameInfo, proj *core.Project, tools core.ToolRegistry) error {
-	// Simple text extraction - find common files and extract strings
+	// Simple text extraction - find common files and extract strings.
 	txtFiles := scanner.WalkDir(info.GameRoot, 3, func(p string) bool {
 		ext := strings.ToLower(filepath.Ext(p))
 		return ext == ".txt" || ext == ".ini" || ext == ".json" || ext == ".csv" || ext == ".xml"
@@ -145,10 +631,7 @@ func extractFromTextFile(path string, proj *core.Project, root string) error {
 	if err != nil {
 		return err
 	}
-	
-	// Very simple string extraction for text files
-	// Only add if it looks like there are actual strings (not just config)
-	
+
 	if ext == ".json" {
 		var m map[string]interface{}
 		if err := json.Unmarshal(data, &m); err == nil {
@@ -158,18 +641,10 @@ func extractFromTextFile(path string, proj *core.Project, root string) error {
 		}
 	}
 
-	// Simple line-by-line fallback
-	file, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	lineNum := 1
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		// If line has = (ini/properties style)
+	// Simple line-by-line fallback for ini/properties-style files.
+	lines := strings.Split(string(data), "\n")
+	for lineNum, raw := range lines {
+		line := strings.TrimSpace(raw)
 		if strings.Contains(line, "=") {
 			parts := strings.SplitN(line, "=", 2)
 			if len(parts) == 2 {
@@ -177,14 +652,13 @@ func extractFromTextFile(path string, proj *core.Project, root string) error {
 				if len(val) > 2 && containsLetters(val) {
 					proj.AddEntry(core.StringEntry{
 						Source: val,
-						File: relPath,
-						Path: strings.TrimSpace(parts[0]),
-						Line: lineNum,
+						File:   relPath,
+						Path:   strings.TrimSpace(parts[0]),
+						Line:   lineNum + 1,
 					})
 				}
 			}
 		}
-		lineNum++
 	}
 
 	proj.ExtractedFiles = append(proj.ExtractedFiles, relPath)
@@ -197,14 +671,14 @@ func extractFromMap(m map[string]interface{}, file, pathPrefix string, proj *cor
 		if pathPrefix != "" {
 			p = pathPrefix + "." + k
 		}
-		
+
 		switch val := v.(type) {
 		case string:
 			if len(val) > 1 && containsLetters(val) {
 				proj.AddEntry(core.StringEntry{
 					Source: val,
-					File: file,
-					Path: p,
+					File:   file,
+					Path:   p,
 				})
 			}
 		case map[string]interface{}:

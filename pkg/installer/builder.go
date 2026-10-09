@@ -1,203 +1,250 @@
+// Package installer builds the end-user Persian localization patch package.
+//
+// The real deliverable is an FFP1 (FarsiForge Patch v1) binary patch file
+// produced by pkg/ffpatch (the Go writer, byte-identical to the C# reader in
+// patcher/FarsiForgePatcher.cs) plus a copy of FarsiForgePatcher.exe staged
+// next to it. The patcher applies the .ffp1 file to the game directory.
+//
+// See patcher/FORMAT.md for the FFP1 format specification.
 package installer
 
 import (
-	"encoding/json"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"farsiforge/pkg/ffpatch"
 )
 
-// PatchManifest describes the contents of a Persian localization patch.
-type PatchManifest struct {
-	PatchName    string            `json:"patch_name"`
-	GameName     string            `json:"game_name"`
-	GameExe      string            `json:"game_exe"`       // relative to game root
-	GameRoot     string            `json:"game_root"`      // absolute path (for reference)
-	Engine       string            `json:"engine"`
-	Version      string            `json:"patch_version"`
-	CreatedAt    time.Time         `json:"created_at"`
-	Files        []PatchFile       `json:"files"`
-	FontFile     string            `json:"font_file"`      // Persian font to install (if any)
-	Description  string            `json:"description"`
-	Author       string            `json:"author"`
+// PatchTarget describes one file to include in the patch.
+type PatchTarget struct {
+	// GamePath is the game-RELATIVE path of the target file, e.g.
+	// "Game_Data/resources.assets". This is what the patcher writes back to.
+	GamePath string `json:"game_path"`
+	// PatchedFile is the absolute path to the already-patched file whose
+	// content will be embedded as a ModeReplace payload.
+	PatchedFile string `json:"patched_file"`
 }
 
-// PatchFile represents one file in the patch.
-type PatchFile struct {
-	RelativePath string `json:"relative_path"`  // path relative to game root
-	PatchPath    string `json:"patch_path"`     // path in the patch directory
-	OriginalHash string `json:"original_hash"`  // SHA256 of original file
-	PatchedHash  string `json:"patched_hash"`   // SHA256 of patched file
-	Size         int64  `json:"size"`
-}
-
-// BuildConfig holds parameters for building the installer.
+// BuildConfig holds parameters for building the installer/patch package.
 type BuildConfig struct {
-	GameRoot      string   // absolute path to game directory
-	ModifiedFiles []string // list of modified file paths (absolute)
-	BackupFiles   []string // list of backup file paths (absolute)
-	FontFile      string   // path to Persian font file (optional)
-	GameExe       string   // game executable path (relative to game root)
-	Engine        string   // engine name
-	PatchName     string   // name of the patch
-	Description   string   // patch description
-	Author        string   // author name
-	OutputDir     string   // where to create the installer package
+	// GameRoot is the absolute path to the (original) game directory. Used
+	// only to compute default game-relative paths when GamePath is empty.
+	GameRoot string `json:"game_root"`
+
+	// Targets are the files to embed in the FFP1 patch.
+	Targets []PatchTarget `json:"targets"`
+
+	// PatcherExe is the absolute path to FarsiForgePatcher.exe. It is copied
+	// into the output directory next to the .ffp1 patch. If empty, the
+	// patcher binary is omitted (and a warning is returned).
+	PatcherExe string `json:"patcher_exe"`
+
+	// FontFile is an optional Persian font to install alongside the patch.
+	FontFile string `json:"font_file,omitempty"`
+
+	// Metadata for the FFP1 header.
+	GameExe     string `json:"game_exe"`
+	Engine      string `json:"engine"`
+	PatchName   string `json:"patch_name"`
+	Description string `json:"description"`
+	Author      string `json:"author"`
+
+	// OutputDir is where the package is created.
+	OutputDir string `json:"output_dir"`
 }
 
-// Build creates a complete installer package.
-// The output directory will contain:
-//   - installer.exe (the launcher/patcher)
-//   - patch/ directory with modified files
-//   - backup/ directory with original files
-//   - patch.json manifest
-//   - font/ directory (if font is provided)
-func Build(cfg BuildConfig) error {
-	// Create output directory
-	if err := os.MkdirAll(cfg.OutputDir, 0755); err != nil {
-		return fmt.Errorf("create output dir: %w", err)
+// BuildResult describes the produced package.
+type BuildResult struct {
+	OutputDir     string `json:"output_dir"`
+	PatchFile     string `json:"patch_file"`
+	PatcherExe    string `json:"patcher_exe"`
+	TargetCount   int    `json:"target_count"`
+	FontInstalled bool   `json:"font_installed"`
+}
+
+// PatchFileName is the name of the FFP1 patch file inside the package.
+const PatchFileName = "FarsiForgePatch.ffp1"
+
+// PatcherExeName is the name of the staged patcher binary.
+const PatcherExeName = "FarsiForgePatcher.exe"
+
+// Build creates a complete patch package: an FFP1 binary patch written with
+// pkg/ffpatch (ModeReplace per target) plus a copy of FarsiForgePatcher.exe,
+// an optional font, and a README. It returns a BuildResult describing the
+// outputs.
+func Build(cfg BuildConfig) (*BuildResult, error) {
+	if cfg.OutputDir == "" {
+		return nil, fmt.Errorf("installer: output_dir is required")
+	}
+	if len(cfg.Targets) == 0 {
+		return nil, fmt.Errorf("installer: no patch targets provided")
 	}
 
-	manifest := PatchManifest{
-		PatchName:   cfg.PatchName,
-		GameName:    filepath.Base(cfg.GameRoot),
-		GameExe:     cfg.GameExe,
-		GameRoot:    cfg.GameRoot,
-		Engine:      cfg.Engine,
-		Version:     "1.0.0",
-		CreatedAt:   time.Now(),
-		Description: cfg.Description,
-		Author:      cfg.Author,
+	if err := os.MkdirAll(cfg.OutputDir, 0o755); err != nil {
+		return nil, fmt.Errorf("installer: create output dir: %w", err)
 	}
 
-	// Copy modified files to patch/ directory
-	patchDir := filepath.Join(cfg.OutputDir, "patch")
-	os.MkdirAll(patchDir, 0755)
+	result := &BuildResult{OutputDir: cfg.OutputDir, TargetCount: len(cfg.Targets)}
 
-	for _, modFile := range cfg.ModifiedFiles {
-		relPath, err := filepath.Rel(cfg.GameRoot, modFile)
-		if err != nil {
-			continue
+	// 1. Write the FFP1 patch file.
+	patchPath := filepath.Join(cfg.OutputDir, PatchFileName)
+	if err := writeFFP1Patch(patchPath, cfg); err != nil {
+		return result, fmt.Errorf("installer: write FFP1 patch: %w", err)
+	}
+	result.PatchFile = patchPath
+
+	// 2. Stage the patcher binary alongside the patch.
+	if cfg.PatcherExe != "" && fileExists(cfg.PatcherExe) {
+		dst := filepath.Join(cfg.OutputDir, PatcherExeName)
+		if err := copyFile(cfg.PatcherExe, dst); err != nil {
+			return result, fmt.Errorf("installer: stage patcher exe: %w", err)
 		}
-
-		dstPath := filepath.Join(patchDir, relPath)
-		os.MkdirAll(filepath.Dir(dstPath), 0755)
-
-		if err := copyFile(modFile, dstPath); err != nil {
-			return fmt.Errorf("copy modified file %s: %w", relPath, err)
-		}
-
-		// Find corresponding backup
-		var origHash, patchedHash string
-		patchedHash = hashFile(dstPath)
-
-		pf := PatchFile{
-			RelativePath: relPath,
-			PatchPath:    relPath,
-			PatchedHash:  patchedHash,
-			Size:         fileSize(dstPath),
-		}
-
-		// Try to find original file hash from backup
-		for _, backup := range cfg.BackupFiles {
-			backupRel, _ := filepath.Rel(cfg.GameRoot, backup)
-			// Backup files might be in a work directory — try to match by relative path
-			if strings.HasSuffix(backup, relPath) || backupRel == relPath {
-				origHash = hashFile(backup)
-				break
-			}
-		}
-		pf.OriginalHash = origHash
-
-		manifest.Files = append(manifest.Files, pf)
+		result.PatcherExe = dst
 	}
 
-	// Copy backup files to backup/ directory
-	backupDir := filepath.Join(cfg.OutputDir, "backup")
-	os.MkdirAll(backupDir, 0755)
-
-	for _, backup := range cfg.BackupFiles {
-		// Determine relative path
-		relPath, err := filepath.Rel(cfg.GameRoot, backup)
-		if err != nil {
-			// Try using the filename
-			relPath = filepath.Base(backup)
-		}
-
-		// If it's from a work directory, try to find the game-relative path
-		if strings.Contains(backup, "backup") || strings.Contains(backup, "work") {
-			// Try to extract the game-relative path from the modified files
-			for _, mod := range cfg.ModifiedFiles {
-				modRel, _ := filepath.Rel(cfg.GameRoot, mod)
-				if strings.HasSuffix(backup, filepath.Base(mod)) {
-					relPath = modRel
-					break
-				}
-			}
-		}
-
-		dstPath := filepath.Join(backupDir, relPath)
-		os.MkdirAll(filepath.Dir(dstPath), 0755)
-		copyFile(backup, dstPath)
-	}
-
-	// Copy font file if provided
+	// 3. Copy font file if provided.
 	if cfg.FontFile != "" && fileExists(cfg.FontFile) {
 		fontDir := filepath.Join(cfg.OutputDir, "font")
-		os.MkdirAll(fontDir, 0755)
-		fontDst := filepath.Join(fontDir, filepath.Base(cfg.FontFile))
-		copyFile(cfg.FontFile, fontDst)
-		manifest.FontFile = filepath.Base(cfg.FontFile)
+		if err := os.MkdirAll(fontDir, 0o755); err == nil {
+			fontDst := filepath.Join(fontDir, filepath.Base(cfg.FontFile))
+			if err := copyFile(cfg.FontFile, fontDst); err == nil {
+				result.FontInstalled = true
+			}
+		}
 	}
 
-	// Write manifest
-	manifestPath := filepath.Join(cfg.OutputDir, "patch.json")
-	data, err := json.MarshalIndent(manifest, "", "  ")
+	// 4. Write a README.
+	writeReadme(cfg, result)
+
+	return result, nil
+}
+
+// writeFFP1Patch streams an FFP1 patch to patchPath. Each target is added as
+// a ModeReplace target with a single embedded payload (the full patched file
+// content). Final sha256/size are computed automatically by the writer.
+func writeFFP1Patch(patchPath string, cfg BuildConfig) error {
+	f, err := os.Create(patchPath)
 	if err != nil {
-		return fmt.Errorf("marshal manifest: %w", err)
+		return err
 	}
-	if err := os.WriteFile(manifestPath, data, 0644); err != nil {
-		return fmt.Errorf("write manifest: %w", err)
+	defer f.Close()
+
+	w, err := ffpatch.NewWriter(f)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err == nil {
+			err = w.Close()
+		}
+	}()
+
+	w.SetMetadata(ffpatch.Metadata{
+		PatchName:    orDefault(cfg.PatchName, "FarsiForge Patch"),
+		GameName:     filepath.Base(orDefault(cfg.GameRoot, ".")),
+		GameExe:      cfg.GameExe,
+		Engine:       cfg.Engine,
+		PatchVersion: "1.0.0",
+		Author:       orDefault(cfg.Author, "FarsiForge"),
+		Description:  cfg.Description,
+		CreatedAt:    time.Now().UTC().Format("2006-01-02T15:04:05Z"),
+	})
+
+	for _, t := range cfg.Targets {
+		gamePath := t.GamePath
+		if gamePath == "" && cfg.GameRoot != "" && filepath.IsAbs(t.PatchedFile) {
+			gamePath, _ = filepath.Rel(cfg.GameRoot, t.PatchedFile)
+		}
+		if gamePath == "" {
+			gamePath = filepath.Base(t.PatchedFile)
+		}
+		// Normalize to forward slashes for cross-platform consistency.
+		gamePath = filepath.ToSlash(gamePath)
+
+		data, err := os.ReadFile(t.PatchedFile)
+		if err != nil {
+			return fmt.Errorf("read patched file %s: %w", t.PatchedFile, err)
+		}
+
+		target, err := w.AddTarget(gamePath, ffpatch.ModeReplace)
+		if err != nil {
+			return err
+		}
+		target.AddPayload(gamePath, data)
 	}
 
-	// Write a README
+	return nil
+}
+
+// writeReadme writes a bilingual README.txt into the output directory.
+func writeReadme(cfg BuildConfig, result *BuildResult) {
 	readme := fmt.Sprintf(`%s — فارسی‌ساز
 ================================
 
 بازی: %s
 موتور: %s
-نسخه پچ: %s
+نسخه پچ: 1.0.0
 سازنده: %s
 
 توضیحات: %s
-
 تعداد فایل‌های تغییر یافته: %d
 
 روش نصب:
-1. فایل installer.exe را در پوشه بازی اجرا کنید
-2. یا فایل installer.exe را در هر جایی اجرا کنید و پوشه بازی را مشخص کنید
+1. فایل %s و FarsiForgePatch.ffp1 را در کنار هم نگه دارید
+2. %s را اجرا کنید و پوشه بازی را مشخص کنید
+3. یا %s را در پوشه بازی کپی کرده و اجرا کنید
 
 برای حذف فارسی‌ساز:
-1. installer.exe را اجرا کنید
+1. %s را اجرا کنید
 2. گزینه "حذف فارسی‌ساز" را انتخاب کنید
-`, cfg.PatchName, filepath.Base(cfg.GameRoot), cfg.Engine, manifest.Version, cfg.Author,
-			cfg.Description, len(manifest.Files))
 
-	os.WriteFile(filepath.Join(cfg.OutputDir, "README.txt"), []byte(readme), 0644)
+---
+Game: %s
+Engine: %s
+Patch version: 1.0.0
+Author: %s
+Description: %s
+Modified files: %d
 
-	return nil
+Install:
+1. Keep %s and FarsiForgePatch.ffp1 together
+2. Run %s and select the game folder
+3. Or copy %s into the game folder and run it
+
+Uninstall:
+1. Run %s
+2. Choose "Uninstall"
+`,
+		orDefault(cfg.PatchName, "FarsiForge Patch"),
+		filepath.Base(orDefault(cfg.GameRoot, ".")), cfg.Engine,
+		orDefault(cfg.Author, "FarsiForge"), cfg.Description, result.TargetCount,
+		PatcherExeName, PatcherExeName, PatcherExeName, PatcherExeName,
+		filepath.Base(orDefault(cfg.GameRoot, ".")), cfg.Engine,
+		orDefault(cfg.Author, "FarsiForge"), cfg.Description, result.TargetCount,
+		PatcherExeName, PatcherExeName, PatcherExeName, PatcherExeName,
+	)
+
+	_ = os.WriteFile(filepath.Join(cfg.OutputDir, "README.txt"), []byte(readme), 0o644)
 }
 
-// copyFile copies a file from src to dst.
+// ── helpers ─────────────────────────────────────────────────────────
+
 func copyFile(src, dst string) error {
 	srcFile, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer srcFile.Close()
+
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
 
 	dstFile, err := os.Create(dst)
 	if err != nil {
@@ -210,24 +257,27 @@ func copyFile(src, dst string) error {
 }
 
 func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
-func fileSize(path string) int64 {
-	info, err := os.Stat(path)
-	if err != nil {
-		return 0
-	}
-	return info.Size()
-}
-
-func hashFile(path string) string {
-	// Simple hash — just return file size as string for now
-	// A proper implementation would use SHA256
-	info, err := os.Stat(path)
+// sha256Hex returns the hex-encoded SHA-256 of a file, or "" on error.
+func sha256Hex(path string) string {
+	f, err := os.Open(path)
 	if err != nil {
 		return ""
 	}
-	return fmt.Sprintf("%d", info.Size())
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func orDefault(s, def string) string {
+	if strings.TrimSpace(s) == "" {
+		return def
+	}
+	return s
 }

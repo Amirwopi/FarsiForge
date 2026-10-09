@@ -1,75 +1,115 @@
-# FarsiForge (فارسی‌فورج) 🚀
+<div align="center">
+  
+# 🇮🇷 FarsiForge (فارسی‌فورج)
 
-FarsiForge is an advanced, production-ready localization and patching framework designed specifically to bring Persian (Farsi) support to video games. It automates the complex pipeline of detecting game engines, extracting text assets, fixing RTL (Right-to-Left) text shaping, and safely injecting translations back into the game.
+**The Ultimate AI-Powered Persian Localization Framework for Modern Game Engines**
 
-## 🌟 Features
+[![Go Version](https://img.shields.io/badge/Go-1.21%2B-blue.svg?style=flat-square)](https://golang.org)
+[![React](https://img.shields.io/badge/React-18-blue.svg?style=flat-square)](https://reactjs.org/)
+[![Wails](https://img.shields.io/badge/Wails-v2-red.svg?style=flat-square)](https://wails.io)
+[![License](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](LICENSE)
 
-- **Automated Engine Detection**: Dynamically scans game directories to detect engines (Unity, Unreal, Godot) with a high-confidence scoring system.
-- **Plugin-Based Architecture**: Extractor and Injector logic is strictly decoupled. Adding support for a new engine (e.g., RPGMaker, RenPy) is as simple as dropping in a new plugin.
-- **Robust Safety Mechanisms**: Employs SHA-256 hashing and sidecar backups. It never modifies original game files without a secure rollback point.
-- **Advanced Persian Text Processing**: Built-in logic for:
-  - RTL (Right-to-Left) BiDi reordering.
-  - Arabic/Persian Glyph Reshaping (contextual forms).
-  - Arabic Yeh/Kaf to Persian Yeh/Kaf normalization.
-  - Persian digit conversion.
-- **Professional UI/UX**: Includes a high-end Glassmorphism Cyberpunk React/Next.js dashboard for seamless visual interaction.
-- **Headless CLI**: Includes a lightning-fast CLI for automated pipelines and debugging.
+![FarsiForge Banner](https://via.placeholder.com/800x200.png?text=FarsiForge+Persian+Game+Engine)
 
----
+*FarsiForge is an automated, high-performance toolkit designed to extract, translate, shape, and inject Persian (Farsi) text into game assets across multiple engines like Unity, Unreal, and Godot.*
 
-## 🛠️ Getting Started
+</div>
 
-### 1. Requirements
-- **Go 1.21+** (for building the core engine)
-- **Node.js 20+** (for the UI dashboard)
-- **External Tools**: UnityPy, UnrealLocres, gdre_tools (Place inside `Tools/` directory if needed for specific engines).
+## ✨ Features
 
-### 2. Building the Project
-
-Compile the Go binaries to the `bin/` folder:
-```powershell
-mkdir bin
-go build -o bin/farsiforge-api.exe ./cmd/farsiforge
-go build -o bin/farsiforge-cli.exe ./cmd/farsiforge-cli
-```
-
-Build the Frontend UI:
-```powershell
-cd frontend
-npm install
-npm run build
-```
+- **🚀 Multi-Engine Support:** 11+ engines — Unity (Mono/IL2CPP), Unreal 3/4/5, Godot 3/4, SAGE, GoldSrc, Source 2, FromSoftware, Factorio, Project Zomboid, RAGE.
+- **📝 Intelligent Text Extraction:** Dialogue, item names, menus, tutorials and descriptions from `TextAsset`/`MonoBehaviour` (Unity), `.locres` + `.uasset/.uexp` (Unreal, incl. `.pak`-packed), recovered `.tres/.gd/.tscn` (Godot), Valve KeyValues, Lua tables, `.big/.csf` archives and more.
+- **🔄 Persian Text Shaping:** Built-in RTL (Right-to-Left) reshaping, bi-directional text processing, and Arabic-Indic digit conversion.
+- **🎨 Modern Dashboard:** A beautiful, GPU-accelerated desktop UI built with React, Next.js, and Wails.
+- **🛠️ Automated Pipeline:** From extraction to injection, everything runs locally through a seamless step-by-step UI.
+- **📦 Patch Generator:** Easily build final translation installers/patches with translator credits to share with the community.
 
 ---
 
-## 💻 Usage
+## 🎮 Supported Engines
 
-### Option 1: Modern Web Dashboard (Recommended)
-Launch the API and the Next.js frontend:
-```powershell
-# 1. Start the API
-.\bin\farsiforge-api.exe
+| Engine | Detection | Text Extraction | Tooling | Status |
+|--------|-----------|-----------------|---------|--------|
+| **Unity** (Mono + IL2CPP) | ✅ | ✅ TextAssets + MonoBehaviours + raw-scan fallback | UnityPy, Il2CppDumper | 🟢 Stable |
+| **Unreal Engine 4/5** | ✅ | ✅ `.locres` (loose + inside `.pak`) + `.uasset/.uexp` scan | fftools, repak | 🟢 Stable |
+| **Godot 3/4** | ✅ | ✅ `.pck` recovery → `.tres/.gd/.tscn` text + `.translation` | gdre_tools, fftools | 🟢 Stable |
+| **SAGE** (CnC Generals / ZH / RA3) | ✅ | ✅ `.big` archives → `.csf` strings + manifests | built-in parser | 🟢 Beta |
+| **GoldSrc** (Half-Life / CS 1.6) | ✅ | ✅ Valve KeyValues `*_english.txt` | built-in parser | 🟢 Beta |
+| **Source 2** (CS2 / Deadlock) | ✅ | ✅ Valve KeyValues localization | built-in parser | 🟢 Beta |
+| **FromSoftware** (ELDEN RING) | ✅ | ⚠️ `.bdt/.bhd` archives (packed) | — | 🟡 Detection only |
+| **Factorio** | ✅ | ✅ `locale/*.cfg` | built-in parser | 🟢 Beta |
+| **Project Zomboid** | ✅ | ✅ Lua translation tables | built-in parser | 🟢 Beta |
+| **RAGE** (GTA V) | ✅ | ⚠️ `.rpf` archives (packed) | — | 🟡 Detection only |
+| **UE3** (MK10 etc.) | ✅ | ⚠️ Coalesced/`.upk` | — | 🟡 Detection only |
 
-# 2. Start the UI
-cd frontend
-npm run dev
-```
-Open `http://localhost:3000` to access the FarsiForge Wizard.
-
-### Option 2: Command Line Interface (CLI)
-For developers or automated environments, use the CLI to run the full pipeline safely:
-```powershell
-.\bin\farsiforge-cli.exe -dir "D:\Path\To\Game" -action pipeline
-```
+**Verified extraction results** (real games, 2026-10):
+Raft 58k strings · Hacker Simulator 11k · EscapeTheBackrooms 103k · MOLDRISE 6k · Supermarket Together 14k · ASKA 135k · Deadlock 58k · Project Zomboid 14k · Factorio 15k · CS 1.6 2.7k · CnC Zero Hour 1.5k · RA3 35k · Orc Massage 607 · ddper 504 · ELDEN RING 1.4k
 
 ---
 
 ## 🏗️ Architecture
-- `pkg/core`: Core data models and plugin interfaces (`IExtractor`, `IInjector`).
-- `pkg/detection`: Registry-based engine signature scanner.
-- `pkg/extract` & `pkg/inject`: Implementation of extraction/injection logic per engine.
-- `pkg/persian`: Standardized Persian string manipulation.
-- `pkg/backup`: Transactional backup manager with SHA256 integrity.
+
+FarsiForge uses a robust **Go** backend integrated with a **React (Next.js)** frontend using **Wails**.
+- **Backend (`pkg/`)**: 
+  - `detection`: Identifies 11+ game engines automatically (Unity, Unreal, UE3, Godot, SAGE, GoldSrc, Source 2, FromSoftware, Factorio, Zomboid, RAGE) with a nested-dir resolver for games installed one or two levels deep.
+  - `extract`: Parses game assets via embedded Python scripts (Unity), native Go parsers (Valve KeyValues, Lua tables, Factorio cfg, SAGE `.big/.csf`), and CLI tools (repak, gdre_tools, fftools).
+  - `inject`: Applies Persian shaping and re-injects translated strings back into `.assets` / `.locres` / `.pck` files.
+  - `tools`: A smart registry that dynamically resolves required external dependencies (UnityPy, gdre_tools, repak, fftools).
+- **Frontend (`frontend/`)**: Modern UI powered by TailwindCSS and Framer Motion.
+- **Patcher (`patcher/`)**: Standalone C# GUI patcher (`FarsiForgePatcher.exe`, FFP1 format) that installs a translation patch directly onto the game.
+
+---
+
+## 🚀 Getting Started
+
+### Prerequisites
+- [Go 1.21+](https://golang.org/dl/)
+- [Node.js 18+](https://nodejs.org/)
+- [Python 3.10+](https://www.python.org/) with `pip`
+- [Wails CLI](https://wails.io/docs/gettingstarted/installation)
+
+### Installation & Build
+
+1. **Install Python Dependencies (For Unity)**:
+   ```bash
+   pip install UnityPy
+   ```
+
+2. **Build the Frontend**:
+   ```bash
+   cd frontend && npm install && npm run build
+   ```
+
+3. **Build the Desktop Application**:
+   ```bash
+   wails build -s
+   ```
+   *The final `.exe` is generated at `build/bin/FarsiForge.exe` — copy the `Tools\` folder next to it for a self-contained portable build.*
+
+4. **Build the CLI**:
+   ```bash
+   go build -o build/farsiforge-cli.exe ./cmd/farsiforge-cli
+   ```
+
+---
+
+## 💡 Usage Workflow
+
+1. **Detect**: Open FarsiForge and select your game directory (e.g., `Supermarket Together`). The engine will be automatically detected.
+2. **Extract**: The app unpacks data archives and extracts all translatable IDs into a local project file.
+3. **Translate**: Use the built-in translation grid to edit strings.
+4. **Inject**: FarsiForge applies RTL reshaping to your Persian text and repacks the assets safely.
+5. **Patch**: Build a final standalone patcher for your community.
+
+---
 
 ## 🤝 Contributing
-FarsiForge uses a strict Registry Pattern. To add a new engine, implement the `core.IExtractor` and `core.IInjector` interfaces and register them in their respective packages. No `switch/case` hardcoding is allowed!
+Contributions, issues, and feature requests are welcome! 
+Feel free to check the [issues page](../../issues).
+
+## 📄 License
+This project is licensed under the [MIT License](LICENSE).
+
+<div align="center">
+  <i>Developed with ❤️ for the Persian Gaming Community</i>
+</div>

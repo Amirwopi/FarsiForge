@@ -33,12 +33,12 @@ func (r *Registry) GetExtractor(engine string) (core.IExtractor, error) {
 	if ext, ok := r.extractors[engine]; ok {
 		return ext, nil
 	}
-	
+
 	// Fallback
 	if ext, ok := r.extractors["generic"]; ok {
 		return ext, nil
 	}
-	
+
 	return nil, fmt.Errorf("no extractor available for engine: %s", engine)
 }
 
@@ -46,21 +46,26 @@ func (r *Registry) GetExtractor(engine string) (core.IExtractor, error) {
 // built-in engine extractors.
 func DefaultRegistry() *Registry {
 	r := NewRegistry()
-	
+
 	r.Register(&UnityExtractor{})
 	r.Register(&UnrealExtractor{})
 	r.Register(&GodotExtractor{})
+	r.Register(&GoldSrcExtractor{})
+	r.Register(&Source2Extractor{})
+	r.Register(&FactorioExtractor{})
+	r.Register(&ZomboidExtractor{})
+	r.Register(&SAGEExtractor{})
 	r.Register(&GenericExtractor{})
-	
+
 	// RPGMaker, GameMaker, RenPy, Source, AdobeAIR can be added here
-	
+
 	return r
 }
 
 // Run executes the full extraction pipeline.
 func Run(ctx context.Context, info *core.GameInfo, proj *core.Project, reg core.ToolRegistry) error {
 	r := DefaultRegistry()
-	
+
 	ext, err := r.GetExtractor(info.Engine)
 	if err != nil {
 		return core.Wrap("extract", err, "could not find extractor")
@@ -75,13 +80,13 @@ func Run(ctx context.Context, info *core.GameInfo, proj *core.Project, reg core.
 	}
 
 	log.Info("Starting extraction", "engine", info.Engine, "game", proj.GameName)
-	
+
 	if err := ext.Extract(ctx, info, proj, reg); err != nil {
 		return core.ErrExtractionFailed(info.Engine, err)
 	}
-	
+
 	stats := proj.Stats()
 	log.Info("Extraction completed", "entries", stats.Total)
-	
+
 	return nil
 }

@@ -34,30 +34,136 @@ type Config struct {
 	// Security
 	MaxFileSizeMB int `json:"max_file_size_mb"` // Max file size to load into memory
 	MaxScanDepth  int `json:"max_scan_depth"`   // Max directory depth for scanning
+
+	// ── New optional fields (de-hardcoded, env-overridable) ──
+	// PythonExe is the Python executable name/path used by external tool
+	// scripts. Defaults to "python" on Windows, "python3" elsewhere.
+	// Override with the FARISIFORGE_PYTHON env var.
+	PythonExe string `json:"python_exe,omitempty"`
+
+	// ProjectRoot is the FarsiForge project root directory.
+	// If empty, it is auto-detected. Override with FARISIFORGE_ROOT.
+	ProjectRoot string `json:"project_root,omitempty"`
+}
+
+// Environment variable names used for de-hardcoding config values.
+const (
+	EnvProjectRoot    = "FARISIFORGE_ROOT"
+	EnvToolsDir       = "FARISIFORGE_TOOLS_DIR"
+	EnvOutputDir      = "FARISIFORGE_OUTPUT_DIR"
+	EnvTempDir        = "FARISIFORGE_TEMP_DIR"
+	EnvPythonExe      = "FARISIFORGE_PYTHON"
+	EnvListenAddr     = "FARISIFORGE_LISTEN_ADDR"
+	EnvListenPort     = "FARISIFORGE_LISTEN_PORT"
+	EnvLogLevel       = "FARISIFORGE_LOG_LEVEL"
+	EnvMaxFileSizeMB  = "FARISIFORGE_MAX_FILE_SIZE_MB"
+	EnvMaxScanDepth   = "FARISIFORGE_MAX_SCAN_DEPTH"
+	EnvGameSearchPath = "FARISIFORGE_GAME_SEARCH_PATH"
+)
+
+// defaultPythonExe returns the default Python executable name for the
+// current platform.
+func defaultPythonExe() string {
+	if v := os.Getenv(EnvPythonExe); v != "" {
+		return v
+	}
+	if isWindows() {
+		return "python"
+	}
+	return "python3"
+}
+
+// isWindows returns true on Windows.
+func isWindows() bool {
+	return filepath.Separator == '\\' && os.PathSeparator == ';'
+}
+
+// envOr returns the env var value if set and non-empty, otherwise the
+// provided fallback.
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
 
 // DefaultConfig returns the default configuration.
 func DefaultConfig() Config {
 	homeDir, _ := os.UserHomeDir()
+	root := findProjectRoot()
+
+	// Build game search paths from env + sensible defaults.
+	gamePaths := defaultGameSearchPaths(homeDir)
+	if extra := os.Getenv(EnvGameSearchPath); extra != "" {
+		gamePaths = append(gamePaths, filepath.SplitList(extra)...)
+	}
+
 	return Config{
-		ToolsDir:  findToolsDir(),
-		OutputDir: filepath.Join(findProjectRoot(), "output"),
-		TempDir:   filepath.Join(os.TempDir(), "farsiforge"),
-		GameSearchPaths: []string{
-			`D:\SteamLibrary\steamapps\common`,
-			`D:\games`,
-			`C:\Program Files (x86)\Steam\steamapps\common`,
-			filepath.Join(homeDir, "Games"),
-		},
-		ListenAddr:         "127.0.0.1",
-		ListenPort:         7842,
+		ToolsDir:           findToolsDir(),
+		OutputDir:          envOr(EnvOutputDir, filepath.Join(root, "output")),
+		TempDir:            envOr(EnvTempDir, filepath.Join(os.TempDir(), "farsiforge")),
+		GameSearchPaths:    gamePaths,
+		ListenAddr:         envOr(EnvListenAddr, "127.0.0.1"),
+		ListenPort:         envIntOr(EnvListenPort, 7842),
 		DefaultPersianOpts: DefaultPersianOptions(),
 		DefaultAuthor:      "FarsiForge",
 		DefaultLanguage:    "fa-IR",
-		LogLevel:           "info",
-		MaxFileSizeMB:      100,
-		MaxScanDepth:       6,
+		LogLevel:           envOr(EnvLogLevel, "info"),
+		MaxFileSizeMB:      envIntOr(EnvMaxFileSizeMB, 100),
+		MaxScanDepth:       envIntOr(EnvMaxScanDepth, 6),
+		PythonExe:          defaultPythonExe(),
+		ProjectRoot:        root,
 	}
+}
+
+// defaultGameSearchPaths returns the default game search paths, derived
+// from the home directory and common Steam/Epic locations without
+// hardcoding a single absolute path.
+func defaultGameSearchPaths(homeDir string) []string {
+	var paths []string
+
+	// Steam common locations (only add those that exist on this machine).
+	steamCandidates := []string{
+		`D:\SteamLibrary\steamapps\common`,
+		`C:\Program Files (x86)\Steam\steamapps\common`,
+		`E:\SteamLibrary\steamapps\common`,
+		`F:\SteamLibrary\steamapps\common`,
+		filepath.Join(homeDir, ".steam", "steam", "steamapps", "common"),
+	}
+	for _, p := range steamCandidates {
+		if dirExists(p) {
+			paths = append(paths, p)
+		}
+	}
+
+	// Generic games directory.
+	if dirExists(`D:\games`) {
+		paths = append(paths, `D:\games`)
+	}
+	paths = append(paths, filepath.Join(homeDir, "Games"))
+
+	return paths
+}
+
+// envIntOr returns the env var value parsed as int, or the fallback.
+func envIntOr(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	var n int
+	if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
+		return fallback
+	}
+	return n
+}
+
+// dirExists is a local helper to avoid importing the scanner package
+// (which would create a circular dependency: scanner has no dep on core,
+// but we keep core self-contained).
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 // LoadConfig loads configuration from a JSON file.
@@ -117,8 +223,36 @@ func ConfigPath() string {
 }
 
 // findProjectRoot tries to find the FarsiForge project root directory.
+// It checks the FARISIFORGE_ROOT env var first, then walks up from the
+// current working directory looking for a go.mod containing "farsiforge",
+// then falls back to known locations.
 func findProjectRoot() string {
-	// Check common locations
+	// 1. Env var override
+	if v := os.Getenv(EnvProjectRoot); v != "" {
+		if dirExists(filepath.Join(v, "go.mod")) || dirExists(v) {
+			return v
+		}
+	}
+
+	// 2. Walk up from CWD looking for go.mod with "farsiforge"
+	if cwd, err := os.Getwd(); err == nil {
+		dir := cwd
+		for i := 0; i < 10; i++ {
+			modPath := filepath.Join(dir, "go.mod")
+			if data, err := os.ReadFile(modPath); err == nil {
+				if strings.Contains(string(data), "farsiforge") {
+					return dir
+				}
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
+	}
+
+	// 3. Known locations (last resort)
 	candidates := []string{
 		`D:\FarsiForge`,
 		`.`,
@@ -126,7 +260,6 @@ func findProjectRoot() string {
 	for _, c := range candidates {
 		abs, _ := filepath.Abs(c)
 		if _, err := os.Stat(filepath.Join(abs, "go.mod")); err == nil {
-			// Verify it's the FarsiForge go.mod
 			data, _ := os.ReadFile(filepath.Join(abs, "go.mod"))
 			if strings.Contains(string(data), "farsiforge") {
 				return abs
@@ -137,7 +270,12 @@ func findProjectRoot() string {
 }
 
 // findToolsDir locates the Tools directory.
+// It checks the FARISIFORGE_TOOLS_DIR env var first, then derives from
+// the project root.
 func findToolsDir() string {
+	if v := os.Getenv(EnvToolsDir); v != "" {
+		return v
+	}
 	root := findProjectRoot()
 	toolsDir := filepath.Join(root, "Tools")
 	if info, err := os.Stat(toolsDir); err == nil && info.IsDir() {

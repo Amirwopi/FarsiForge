@@ -20,7 +20,7 @@ import (
 	"farsiforge/pkg/extract"
 	"farsiforge/pkg/inject"
 	"farsiforge/pkg/installer"
-	
+
 	"farsiforge/pkg/core"
 	"farsiforge/pkg/tools"
 )
@@ -30,10 +30,10 @@ var webFS embed.FS
 
 // Global state (single-user desktop app)
 var (
-	registry     *tools.Registry
-	currentProj  *core.Project
-	currentInfo  *core.GameInfo
-	projectFile  string
+	registry    *tools.Registry
+	currentProj *core.Project
+	currentInfo *core.GameInfo
+	projectFile string
 )
 
 func main() {
@@ -110,12 +110,12 @@ func handleDetect(w http.ResponseWriter, r *http.Request) {
 		respondError(w, 500, err.Error())
 		return
 	}
-	
+
 	dataPath := ""
 	if len(res.DataPaths) > 0 {
 		dataPath = res.DataPaths[0]
 	}
-	
+
 	currentInfo = &core.GameInfo{
 		Engine:     res.Engine,
 		Backend:    res.Backend,
@@ -288,7 +288,7 @@ func handleInject(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		GameInfo core.GameInfo   `json:"game_info"`
-		Options  map[string]bool      `json:"options"`
+		Options  map[string]bool `json:"options"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, 400, "invalid request")
@@ -340,42 +340,64 @@ func handleBuildInstaller(w http.ResponseWriter, r *http.Request) {
 		req.OutputDir = filepath.Join("D:\\FarsiForge", "output", currentProj.GameName)
 	}
 
-	// Build the installer package
-	cfg := installer.BuildConfig{
-		GameRoot:      currentInfo.GameRoot,
-		ModifiedFiles: currentProj.ModifiedFiles,
-		BackupFiles:   currentProj.ExtractedFiles,
-		GameExe:       currentInfo.GameExe,
-		Engine:        string(currentInfo.Engine),
-		PatchName:     req.PatchName,
-		Description:   req.Description,
-		Author:        req.Author,
-		OutputDir:     req.OutputDir,
+	// Collect patch targets from the project's modified files. The patched
+	// copies live in the project working directory.
+	workDir := currentProj.WorkingDir
+	if workDir == "" {
+		workDir = filepath.Join(filepath.Dir(projectFile), "work")
+	}
+	var targets []installer.PatchTarget
+	for _, mf := range currentProj.ModifiedFiles {
+		patchedFile := filepath.Join(workDir, filepath.Base(mf))
+		if !fileExistsLocal(patchedFile) {
+			patchedFile = filepath.Join(currentInfo.GameRoot, mf)
+		}
+		if !fileExistsLocal(patchedFile) {
+			continue
+		}
+		targets = append(targets, installer.PatchTarget{
+			GamePath:    mf,
+			PatchedFile: patchedFile,
+		})
 	}
 
-	if err := installer.Build(cfg); err != nil {
+	// Resolve the patcher exe from the tool registry.
+	patcherExe := ""
+	if registry != nil {
+		patcherExe = filepath.Join(registry.RootDir, "patcher", "FarsiForgePatcher.exe")
+	}
+
+	cfg := installer.BuildConfig{
+		GameRoot:    currentInfo.GameRoot,
+		Targets:     targets,
+		PatcherExe:  patcherExe,
+		GameExe:     currentInfo.GameExe,
+		Engine:      string(currentInfo.Engine),
+		PatchName:   req.PatchName,
+		Description: req.Description,
+		Author:      req.Author,
+		OutputDir:   req.OutputDir,
+	}
+
+	res, err := installer.Build(cfg)
+	if err != nil {
 		respondError(w, 500, err.Error())
 		return
 	}
 
-	// Also build the installer executable
-	installerPath := ""
-	if runtime.GOOS == "windows" {
-		installerPath = filepath.Join(req.OutputDir, "installer.exe")
-		// Compile the installer binary
-		installerSrc := "farsiforge/cmd/farsiforge-installer"
-		cmd := exec.Command("go", "build", "-o", installerPath, installerSrc)
-		cmd.Dir = "D:\\FarsiForge"
-		if err := cmd.Run(); err != nil {
-			log.Printf("Failed to build installer exe: %v", err)
-		}
-	}
-
 	respondJSON(w, map[string]interface{}{
-		"output_dir":     req.OutputDir,
-		"installer_path": installerPath,
-		"file_count":     len(cfg.ModifiedFiles),
+		"output_dir":   res.OutputDir,
+		"patch_file":   res.PatchFile,
+		"patcher_exe":  res.PatcherExe,
+		"target_count": res.TargetCount,
 	})
+}
+
+// fileExistsLocal is a local helper to avoid pulling in the scanner package
+// just for a stat check.
+func fileExistsLocal(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
 // ─── Utilities ─────────────────────────────────────────────────────
