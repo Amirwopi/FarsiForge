@@ -55,7 +55,7 @@ func main() {
 
 	ctx := context.Background()
 	reg := detection.DefaultRegistry()
-	toolReg, err := tools.NewRegistry("D:\\FarsiForge\\Tools")
+	toolReg, err := tools.NewRegistry("")
 	if err != nil {
 		fmt.Printf("Warning: Tools registry init failed: %v\n", err)
 	}

@@ -39,7 +39,7 @@ var (
 func main() {
 	// Initialize tool registry
 	var err error
-	registry, err = tools.NewRegistry("D:\\FarsiForge\\Tools")
+	registry, err = tools.NewRegistry("")
 	if err != nil {
 		log.Printf("Warning: %v", err)
 	}
@@ -337,7 +337,9 @@ func handleBuildInstaller(w http.ResponseWriter, r *http.Request) {
 	json.NewDecoder(r.Body).Decode(&req)
 
 	if req.OutputDir == "" {
-		req.OutputDir = filepath.Join("D:\\FarsiForge", "output", currentProj.GameName)
+		// Mirror the Wails app (app.go BuildPatcher): patches are written
+		// next to the game, not to a hardcoded project path.
+		req.OutputDir = filepath.Join(currentInfo.GameRoot, "FarsiForge_Patch")
 	}
 
 	// Collect patch targets from the project's modified files. The patched
