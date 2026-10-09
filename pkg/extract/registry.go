@@ -55,6 +55,8 @@ func DefaultRegistry() *Registry {
 	r.Register(&FactorioExtractor{})
 	r.Register(&ZomboidExtractor{})
 	r.Register(&SAGEExtractor{})
+	r.Register(&RAGEExtractor{})
+	r.Register(&FromSoftwareExtractor{})
 	r.Register(&GenericExtractor{})
 
 	// RPGMaker, GameMaker, RenPy, Source, AdobeAIR can be added here

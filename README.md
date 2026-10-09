@@ -36,14 +36,14 @@
 | **SAGE** (CnC Generals / ZH / RA3) | ✅ | ✅ `.big` archives → `.csf` strings + manifests | built-in parser | 🟢 Beta |
 | **GoldSrc** (Half-Life / CS 1.6) | ✅ | ✅ Valve KeyValues `*_english.txt` | built-in parser | 🟢 Beta |
 | **Source 2** (CS2 / Deadlock) | ✅ | ✅ Valve KeyValues localization | built-in parser | 🟢 Beta |
-| **FromSoftware** (ELDEN RING) | ✅ | ⚠️ `.bdt/.bhd` archives (packed) | — | 🟡 Detection only |
+| **FromSoftware** (ELDEN RING) | ✅ | ✅ ELDEN RING Data0 message bundles (BHD5/BDT → DCX/Oodle → BND4/FMG) | built-in Go readers + game Oodle DLL | 🟢 Beta (verified on local install) |
 | **Factorio** | ✅ | ✅ `locale/*.cfg` | built-in parser | 🟢 Beta |
 | **Project Zomboid** | ✅ | ✅ Lua translation tables | built-in parser | 🟢 Beta |
-| **RAGE** (GTA V) | ✅ | ⚠️ `.rpf` archives (packed) | — | 🟡 Detection only |
+| **RAGE** (GTA V) | ✅ | ⚠️ Standalone GXT2 parser; RPF7 archive traversal is pending | built-in Go GXT2 parser | 🟡 Partial |
 | **UE3** (MK10 etc.) | ✅ | ⚠️ Coalesced/`.upk` | — | 🟡 Detection only |
 
 **Verified extraction results** (real games, 2026-10):
-Raft 58k strings · Hacker Simulator 11k · EscapeTheBackrooms 103k · MOLDRISE 6k · Supermarket Together 14k · ASKA 135k · Deadlock 58k · Project Zomboid 14k · Factorio 15k · CS 1.6 2.7k · CnC Zero Hour 1.5k · RA3 35k · Orc Massage 607 · ddper 504 · ELDEN RING 1.4k
+Raft 58k strings · Hacker Simulator 11k · EscapeTheBackrooms 103k · MOLDRISE 6k · Supermarket Together 14k · ASKA 135k · Deadlock 58k · Project Zomboid 14k · Factorio 15k · CS 1.6 2.7k · CnC Zero Hour 1.5k · RA3 35k · Orc Massage 607 · ddper 504 · ELDEN RING 520,750 entries (24 Data0 message bundles; local validation). GTA V RPF7 NG-encrypted extraction is not yet verified.
 
 ---
 
